@@ -2,15 +2,17 @@ const MODULE_ID = "road-provisions";
 const SETTING_DATA = "trackerData";
 const SETTING_LAST_DAY = "lastProcessedDay";
 const WWN_SYSTEM_ID = "wwn";
+const EPSILON = 1e-8;
 
 const DEFAULT_DATA = {
   mode: "travel",
   defaults: {
     foodPerDay: 1,
     waterPerDay: 1,
+    waterMultiplier: 1,
     moneyPerDay: 0,
-    foodNames: "Rations, Ration",
-    waterNames: "Water, Waterskin, Water Skin",
+    foodNames: "Rations, 1 week; Rations; Ration",
+    waterNames: "Waterskin, 1 gallon; Water; Waterskin; Water Skin",
     currencyDenomination: "sp"
   },
   members: []
@@ -29,6 +31,14 @@ function num(value, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function clampMin(value, minimum = 0) {
+  return Math.max(minimum, num(value, minimum));
+}
+
+function roundFraction(value) {
+  return Math.round(clampMin(value) * 1_000_000) / 1_000_000;
+}
+
 function isWWN() {
   return game.system?.id === WWN_SYSTEM_ID;
 }
@@ -44,12 +54,14 @@ function dayOrdinal(worldTime = game.time.worldTime) {
 }
 
 function dayLabel(worldTime = game.time.worldTime) {
-  try {
-    return game.time.calendar.format(worldTime, "timestamp");
-  } catch (_err) {
-    const c = game.time.calendar.timeToComponents(worldTime);
-    return `Year ${c.year}, Day ${c.day + 1}`;
-  }
+  const c = game.time.calendar.timeToComponents(worldTime);
+  const months = game.time.calendar?.months?.values ?? [];
+  const month = months[c.month];
+  const monthName = month?.name || month?.abbreviation || `Month ${c.month + 1}`;
+  const dayOfMonth = c.dayOfMonth + 1;
+  const hh = String(c.hour ?? 0).padStart(2, "0");
+  const mm = String(c.minute ?? 0).padStart(2, "0");
+  return `${monthName} ${dayOfMonth}, Year ${c.year} ${hh}:${mm}`;
 }
 
 function dayKey(worldTime = game.time.worldTime) {
@@ -61,13 +73,38 @@ async function getData() {
   const stored = game.settings.get(MODULE_ID, SETTING_DATA) || {};
   const merged = foundry.utils.mergeObject(clone(DEFAULT_DATA), stored, { inplace: false, recursive: true });
 
-  // v1.0 migration: remove generic-system path settings from the active configuration.
   delete merged.defaults.quantityPath;
   delete merged.defaults.currencyPath;
+
+  // Migrate the old comma-separated defaults. Commas are valid parts of WWN item names,
+  // so v1.2 uses semicolons/newlines as separators instead.
+  if (merged.defaults.foodNames === "Rations, Ration") {
+    merged.defaults.foodNames = DEFAULT_DATA.defaults.foodNames;
+  }
+  if (merged.defaults.waterNames === "Water, Waterskin, Water Skin") {
+    merged.defaults.waterNames = DEFAULT_DATA.defaults.waterNames;
+  }
+
+  merged.defaults.foodPerDay = clampMin(merged.defaults.foodPerDay, 0);
+  merged.defaults.waterPerDay = clampMin(merged.defaults.waterPerDay, 0);
+  merged.defaults.waterMultiplier = clampMin(merged.defaults.waterMultiplier ?? 1, 0);
+  merged.defaults.moneyPerDay = clampMin(merged.defaults.moneyPerDay, 0);
+  merged.defaults.currencyDenomination = merged.defaults.currencyDenomination === "gp" ? "gp" : "sp";
+
   for (const member of merged.members ?? []) {
     delete member.quantityPath;
     delete member.currencyPath;
+    member.enabled = member.enabled !== false;
+    member.foodPerDay = clampMin(member.foodPerDay ?? merged.defaults.foodPerDay, 0);
+    member.waterPerDay = clampMin(member.waterPerDay ?? merged.defaults.waterPerDay, 0);
+    member.moneyPerDay = clampMin(member.moneyPerDay ?? merged.defaults.moneyPerDay, 0);
+    member.foodRemainder = roundFraction(member.foodRemainder ?? 0);
+    member.waterRemainder = roundFraction(member.waterRemainder ?? 0);
+    member.foodItemName ??= "";
+    member.waterItemName ??= "";
+    member.carrierUuid ??= "";
   }
+
   return merged;
 }
 
@@ -75,11 +112,11 @@ async function setData(data) {
   return game.settings.set(MODULE_ID, SETTING_DATA, data);
 }
 
-async function resolveActor(member) {
-  if (!member?.uuid) return null;
+async function resolveUuidActor(uuid) {
+  if (!uuid) return null;
   let doc = null;
   try {
-    doc = await foundry.utils.fromUuid(member.uuid);
+    doc = await foundry.utils.fromUuid(uuid);
   } catch (_err) {
     return null;
   }
@@ -89,30 +126,66 @@ async function resolveActor(member) {
   return null;
 }
 
+async function resolveActor(member) {
+  return resolveUuidActor(member?.uuid);
+}
+
 function parseAliases(text) {
-  return String(text || "")
-    .split(",")
+  const raw = String(text || "").trim();
+  if (!raw) return [];
+
+  // Commas are part of canonical WWN item names (for example
+  // "Rations, 1 week"), so only semicolons/newlines separate aliases.
+  return raw
+    .split(/[;\n]+/)
     .map((s) => s.trim())
     .filter(Boolean);
 }
 
-function findItem(actor, member, kind, defaults) {
-  const idKey = kind === "food" ? "foodItemId" : "waterItemId";
-  const nameKey = kind === "food" ? "foodItemName" : "waterItemName";
-  if (member[idKey]) {
-    const byId = actor.items.get(member[idKey]);
-    if (byId) return byId;
+function normalizeItemName(value) {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+function itemMatchScore(itemName, aliases) {
+  const normalized = normalizeItemName(itemName);
+  let best = Number.POSITIVE_INFINITY;
+
+  for (const alias of aliases) {
+    const a = normalizeItemName(alias);
+    if (!a) continue;
+    if (normalized === a) best = Math.min(best, 0);
+    else if (normalized.startsWith(`${a} `)) best = Math.min(best, 1);
+    else if (` ${normalized} `.includes(` ${a} `)) best = Math.min(best, 2);
   }
 
-  const explicit = String(member[nameKey] || "").trim();
-  const aliases = explicit
-    ? [explicit]
-    : parseAliases(kind === "food" ? defaults.foodNames : defaults.waterNames);
+  return best;
+}
 
-  const lowered = aliases.map((a) => a.toLowerCase());
-  return actor.items.find((i) => lowered.includes(i.name.toLowerCase()))
-    ?? actor.items.find((i) => lowered.some((a) => i.name.toLowerCase().includes(a)))
-    ?? null;
+function getAliases(member, kind, defaults) {
+  const nameKey = kind === "food" ? "foodItemName" : "waterItemName";
+  const explicit = String(member?.[nameKey] || "").trim();
+  if (explicit) return parseAliases(explicit);
+  return parseAliases(kind === "food" ? defaults.foodNames : defaults.waterNames);
+}
+
+function findMatchingItems(actor, member, kind, defaults) {
+  if (!actor) return [];
+  const idKey = kind === "food" ? "foodItemId" : "waterItemId";
+  if (member?.[idKey]) {
+    const byId = actor.items.get(member[idKey]);
+    if (byId) return [byId];
+  }
+
+  const aliases = getAliases(member, kind, defaults);
+  return actor.items
+    .map((item) => ({ item, score: itemMatchScore(item.name, aliases) }))
+    .filter(({ score }) => Number.isFinite(score))
+    .sort((a, b) => a.score - b.score || a.item.name.localeCompare(b.item.name))
+    .map(({ item }) => item);
 }
 
 function hasNumericPath(document, path) {
@@ -121,31 +194,54 @@ function hasNumericPath(document, path) {
   return Number.isFinite(Number(value));
 }
 
+function firstNumericPath(document, paths) {
+  for (const path of paths) {
+    if (hasNumericPath(document, path)) {
+      return { path, value: num(foundry.utils.getProperty(document, path)) };
+    }
+  }
+  return null;
+}
+
 /**
- * WWN has historically represented consumables such as rations with charges.
- * The 2.0 line has gone through schema changes, so detect the native field that
- * actually exists on the Item rather than hard-coding one alpha's shape.
+ * Detect the WWN consumable stock field. WWN charged items commonly expose a
+ * current and maximum charge value. The detector intentionally accepts several
+ * schema shapes because the v2.0 beta has changed data models during development.
  */
 function getConsumableAccessor(item) {
-  const chargePaths = [
+  const current = firstNumericPath(item, [
     "system.charges.value",
     "system.charges.current",
     "system.charges.current.value",
+    "system.charges.remaining",
     "system.uses.value",
     "system.uses.current",
+    "system.uses.current.value",
     "system.charges"
-  ];
-  for (const path of chargePaths) {
-    if (hasNumericPath(item, path)) {
-      return { path, value: num(foundry.utils.getProperty(item, path)), unit: "charges" };
-    }
+  ]);
+
+  if (current) {
+    const maximum = firstNumericPath(item, [
+      "system.charges.max",
+      "system.charges.maximum",
+      "system.charges.max.value",
+      "system.uses.max",
+      "system.uses.maximum",
+      "system.maxCharges",
+      "system.chargesMax"
+    ]);
+    return {
+      path: current.path,
+      value: current.value,
+      unit: "charges",
+      maxPath: maximum?.path ?? null,
+      max: maximum?.value ?? null
+    };
   }
 
-  const quantityPaths = ["system.quantity.value", "system.quantity"];
-  for (const path of quantityPaths) {
-    if (hasNumericPath(item, path)) {
-      return { path, value: num(foundry.utils.getProperty(item, path)), unit: "quantity" };
-    }
+  const quantity = firstNumericPath(item, ["system.quantity.value", "system.quantity"]);
+  if (quantity) {
+    return { path: quantity.path, value: quantity.value, unit: "quantity", maxPath: null, max: null };
   }
 
   return null;
@@ -167,10 +263,44 @@ function numericLeafAccessor(document, path) {
   if (value && typeof value === "object") {
     for (const leaf of ["value", "current", "amount"]) {
       const leafPath = `${path}.${leaf}`;
-      if (hasNumericPath(document, leafPath)) return { path: leafPath, value: num(foundry.utils.getProperty(document, leafPath)) };
+      if (hasNumericPath(document, leafPath)) {
+        return { path: leafPath, value: num(foundry.utils.getProperty(document, leafPath)) };
+      }
     }
   }
   return null;
+}
+
+function collectNumericLeaves(value, prefix = "system", depth = 0, out = []) {
+  if (depth > 7 || value == null) return out;
+  if (Number.isFinite(Number(value)) && typeof value !== "object") {
+    out.push({ path: prefix, value: num(value) });
+    return out;
+  }
+  if (typeof value !== "object" || Array.isArray(value)) return out;
+
+  for (const [key, child] of Object.entries(value)) {
+    collectNumericLeaves(child, `${prefix}.${key}`, depth + 1, out);
+  }
+  return out;
+}
+
+function currencyPathScore(path, denomination) {
+  const lower = path.toLowerCase();
+  const parts = lower.split(".").map(normalizeKey);
+  const denomTokens = denomination === "gp" ? new Set(["gp", "gold", "goldpiece", "goldpieces"]) : new Set(["sp", "silver", "silverpiece", "silverpieces"]);
+
+  if (parts.some((p) => ["bank", "banked", "total", "treasure", "treasurevalue"].includes(p))) return -1000;
+
+  let score = 0;
+  const last = parts.at(-1);
+  const parent = parts.at(-2);
+  if (denomTokens.has(last)) score += 100;
+  if (denomTokens.has(parent) && ["value", "current", "amount"].includes(last)) score += 95;
+  if (parts.some((p) => denomTokens.has(p))) score += 25;
+  if (parts.some((p) => ["currency", "currencies", "coin", "coins"].includes(p))) score += 30;
+  if (parts.some((p) => ["carried", "inventory", "purse"].includes(p))) score += 10;
+  return score;
 }
 
 /** Detect WWN carried coin without requiring a user-entered data path. */
@@ -180,8 +310,7 @@ function getCurrencyAccessor(actor, denomination = "sp") {
     ? new Set(["gp", "gold", "goldpiece", "goldpieces"])
     : new Set(["sp", "silver", "silverpiece", "silverpieces"]);
 
-  // Known/likely WWN roots, checked before the generic fallback scan.
-  for (const root of ["system.currency", "system.coins", "system.wealth.currency"]) {
+  for (const root of ["system.currency", "system.currencies", "system.coins", "system.wealth.currency", "system.wealth.coins"]) {
     const obj = foundry.utils.getProperty(actor, root);
     if (!obj || typeof obj !== "object") continue;
     for (const key of Object.keys(obj)) {
@@ -191,16 +320,22 @@ function getCurrencyAccessor(actor, denomination = "sp") {
     }
   }
 
-  // Direct candidates cover older WWN sheets and simple data models.
   const directCandidates = denom === "gp"
-    ? ["system.currency.gp", "system.gp", "system.gold"]
-    : ["system.currency.sp", "system.sp", "system.silver"];
+    ? ["system.currency.gp", "system.currencies.gp", "system.coins.gp", "system.gp", "system.gold"]
+    : ["system.currency.sp", "system.currencies.sp", "system.coins.sp", "system.sp", "system.silver"];
   for (const path of directCandidates) {
     const accessor = numericLeafAccessor(actor, path);
     if (accessor) return accessor;
   }
 
-  return null;
+  // Last-resort schema scan for WWN 2.x data model changes. Derived bank/total
+  // fields are heavily penalized so only carried currency is selected.
+  const leaves = collectNumericLeaves(actor.system ?? {}, "system");
+  const ranked = leaves
+    .map((entry) => ({ ...entry, score: currencyPathScore(entry.path, denom) }))
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score || a.path.length - b.path.length);
+  return ranked[0] ? { path: ranked[0].path, value: ranked[0].value } : null;
 }
 
 async function setCurrency(actor, accessor, amount) {
@@ -208,87 +343,228 @@ async function setCurrency(actor, accessor, amount) {
   await actor.update({ [accessor.path]: Math.max(0, amount) });
 }
 
-async function snapshotMember(member, defaults) {
+async function supplySourcesForMember(member) {
   const actor = await resolveActor(member);
-  if (!actor) return { member, actor: null, food: null, water: null, currency: null };
+  const carrier = member.carrierUuid ? await resolveUuidActor(member.carrierUuid) : null;
+  const sources = [];
+  if (actor) sources.push({ actor, sourceRank: 0, sourceType: "self", label: actor.name });
+  if (carrier && carrier.uuid !== actor?.uuid) {
+    sources.push({ actor: carrier, sourceRank: 1, sourceType: "carrier", label: carrier.name });
+  }
+  return { actor, carrier, sources };
+}
 
-  const food = findItem(actor, member, "food", defaults);
-  const water = findItem(actor, member, "water", defaults);
-  const foodAccessor = food ? getConsumableAccessor(food) : null;
-  const waterAccessor = water ? getConsumableAccessor(water) : null;
-  const currency = getCurrencyAccessor(actor, defaults.currencyDenomination);
+async function resourceEntriesForMember(member, kind, defaults) {
+  const { actor, carrier, sources } = await supplySourcesForMember(member);
+  const entries = [];
+  const seen = new Set();
+
+  for (const source of sources) {
+    for (const item of findMatchingItems(source.actor, member, kind, defaults)) {
+      const key = item.uuid || `${source.actor.uuid}.${item.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      entries.push({
+        item,
+        accessor: getConsumableAccessor(item),
+        sourceActor: source.actor,
+        sourceRank: source.sourceRank,
+        sourceType: source.sourceType,
+        sourceLabel: source.label
+      });
+    }
+  }
+
+  return { actor, carrier, entries };
+}
+
+async function snapshotMember(member, defaults) {
+  const foodData = await resourceEntriesForMember(member, "food", defaults);
+  const waterData = await resourceEntriesForMember(member, "water", defaults);
+  const actor = foodData.actor ?? waterData.actor;
+  const carrier = foodData.carrier ?? waterData.carrier;
+  const currency = actor ? getCurrencyAccessor(actor, defaults.currencyDenomination) : null;
 
   return {
     member,
     actor,
-    food,
-    water,
-    foodAccessor,
-    waterAccessor,
-    foodQty: foodAccessor?.value ?? 0,
-    waterQty: waterAccessor?.value ?? 0,
+    carrier,
+    foodEntries: foodData.entries,
+    waterEntries: waterData.entries,
     currency,
     money: currency?.value ?? NaN
   };
 }
 
-async function applySupplies(rows, days, defaults) {
-  const results = [];
-  for (const row of rows) {
-    if (!row.apply) continue;
-    const snap = await snapshotMember(row.member, defaults);
-    if (!snap.actor) {
-      results.push(`${row.member.name}: actor/token could not be resolved.`);
-      continue;
-    }
-
-    const foodNeed = Math.max(0, num(row.foodPerDay) * days);
-    const waterNeed = Math.max(0, num(row.waterPerDay) * days);
-
-    if (foodNeed > 0) {
-      if (!snap.food) results.push(`${snap.actor.name}: no ration/food Item found.`);
-      else if (!snap.foodAccessor) results.push(`${snap.actor.name}: ${snap.food.name} has no detectable WWN charges or quantity.`);
-      else {
-        await setConsumableAmount(snap.food, snap.foodAccessor, snap.foodQty - foodNeed);
-        if (snap.foodQty < foodNeed) results.push(`${snap.actor.name}: short ${foodNeed - snap.foodQty} food.`);
-      }
-    }
-
-    if (waterNeed > 0) {
-      if (!snap.water) results.push(`${snap.actor.name}: no water Item found.`);
-      else if (!snap.waterAccessor) results.push(`${snap.actor.name}: ${snap.water.name} has no detectable WWN charges or quantity.`);
-      else {
-        await setConsumableAmount(snap.water, snap.waterAccessor, snap.waterQty - waterNeed);
-        if (snap.waterQty < waterNeed) results.push(`${snap.actor.name}: short ${waterNeed - snap.waterQty} water.`);
-      }
-    }
-  }
-  return results;
+function positiveModulo(value, divisor) {
+  if (!divisor) return 0;
+  const r = value % divisor;
+  return Math.abs(r) < EPSILON ? 0 : r;
 }
 
-async function applyMoney(rows, days, defaults) {
-  const results = [];
-  const denom = String(defaults.currencyDenomination || "sp").toUpperCase();
+function consumptionPriority(entry, currentValue) {
+  const max = num(entry.accessor?.max, 0);
+  const remainder = max > 0 ? positiveModulo(currentValue, max) : 0;
+  const isPartial = max > 0 && currentValue > 0 && remainder > EPSILON;
+  return {
+    isPartial,
+    partialRemaining: isPartial ? remainder : Number.POSITIVE_INFINITY,
+    sourceRank: entry.sourceRank,
+    currentValue
+  };
+}
+
+function sortForConsumption(entries, states) {
+  return [...entries]
+    .filter((entry) => entry.accessor && (states.get(entry.item.uuid)?.amount ?? entry.accessor.value) > 0)
+    .sort((a, b) => {
+      const av = states.get(a.item.uuid)?.amount ?? a.accessor.value;
+      const bv = states.get(b.item.uuid)?.amount ?? b.accessor.value;
+      const ap = consumptionPriority(a, av);
+      const bp = consumptionPriority(b, bv);
+      if (ap.isPartial !== bp.isPartial) return ap.isPartial ? -1 : 1;
+      if (ap.partialRemaining !== bp.partialRemaining) return ap.partialRemaining - bp.partialRemaining;
+      if (ap.sourceRank !== bp.sourceRank) return ap.sourceRank - bp.sourceRank;
+      return ap.currentValue - bp.currentValue;
+    });
+}
+
+function mutableStateFor(entry, states) {
+  const key = entry.item.uuid;
+  let state = states.get(key);
+  if (!state) {
+    state = {
+      item: entry.item,
+      accessor: entry.accessor,
+      original: clampMin(entry.accessor?.value, 0),
+      amount: clampMin(entry.accessor?.value, 0),
+      changed: false
+    };
+    states.set(key, state);
+  }
+  return state;
+}
+
+function allocateUnits(entries, requested, states) {
+  let remaining = Math.max(0, Math.floor(requested + EPSILON));
+  const allocations = [];
+
+  // Re-sort after finishing a partial bundle. This means a 10/7 ration stack
+  // contributes its 3-charge partial bundle first, then the normal source
+  // preference is reconsidered before opening another full bundle.
+  while (remaining > 0) {
+    const sorted = sortForConsumption(entries, states);
+    const entry = sorted[0];
+    if (!entry) break;
+
+    const state = mutableStateFor(entry, states);
+    const available = Math.max(0, Math.floor(state.amount + EPSILON));
+    if (!available) break;
+
+    const priority = consumptionPriority(entry, state.amount);
+    const partialCap = priority.isPartial
+      ? Math.max(1, Math.floor(priority.partialRemaining + EPSILON))
+      : available;
+    const used = Math.min(available, remaining, partialCap);
+
+    state.amount -= used;
+    state.changed = state.changed || used > 0;
+    remaining -= used;
+
+    const previous = allocations.find((a) => a.entry.item.uuid === entry.item.uuid);
+    if (previous) previous.used += used;
+    else allocations.push({ entry, used });
+  }
+
+  return { requested, consumed: requested - remaining, missing: remaining, allocations };
+}
+
+function wholeAndRemainder(total) {
+  const safe = clampMin(total, 0);
+  const whole = Math.floor(safe + EPSILON);
+  return { whole, remainder: roundFraction(safe - whole) };
+}
+
+async function applySupplies(rows, days, waterMultiplier, data) {
+  const warnings = [];
+  const states = new Map();
+  const multiplier = clampMin(waterMultiplier, 0);
 
   for (const row of rows) {
     if (!row.apply) continue;
-    const snap = await snapshotMember(row.member, defaults);
+    const snap = await snapshotMember(row.member, data.defaults);
     if (!snap.actor) {
-      results.push(`${row.member.name}: actor/token could not be resolved.`);
+      warnings.push(`${row.member.name}: actor/token could not be resolved.`);
       continue;
     }
 
-    const cost = Math.max(0, num(row.moneyPerDay) * days);
+    const food = wholeAndRemainder(clampMin(row.member.foodRemainder, 0) + clampMin(row.foodPerDay, 0) * days);
+    const water = wholeAndRemainder(clampMin(row.member.waterRemainder, 0) + clampMin(row.waterPerDay, 0) * multiplier * days);
+
+    const foodResult = allocateUnits(snap.foodEntries, food.whole, states);
+    const waterResult = allocateUnits(snap.waterEntries, water.whole, states);
+
+    row.member.foodRemainder = food.remainder;
+    row.member.waterRemainder = water.remainder;
+
+    if (food.whole > 0 && !snap.foodEntries.length) {
+      warnings.push(`${snap.actor.name}: no matching ration Item found on the character or supply carrier.`);
+    } else if (food.whole > 0 && snap.foodEntries.every((entry) => !entry.accessor)) {
+      warnings.push(`${snap.actor.name}: matching ration Items have no detectable WWN charges/quantity.`);
+    }
+    if (foodResult.missing > 0) warnings.push(`${snap.actor.name}: short ${foodResult.missing} food.`);
+
+    if (water.whole > 0 && !snap.waterEntries.length) {
+      warnings.push(`${snap.actor.name}: no matching water Item found on the character or supply carrier.`);
+    } else if (water.whole > 0 && snap.waterEntries.every((entry) => !entry.accessor)) {
+      warnings.push(`${snap.actor.name}: matching water Items have no detectable WWN charges/quantity.`);
+    }
+    if (waterResult.missing > 0) warnings.push(`${snap.actor.name}: short ${waterResult.missing} water.`);
+  }
+
+  for (const state of states.values()) {
+    if (!state.changed || Math.abs(state.amount - state.original) < EPSILON) continue;
+    try {
+      await setConsumableAmount(state.item, state.accessor, state.amount);
+    } catch (err) {
+      console.error(`${MODULE_ID} | Failed to update ${state.item.name}`, err);
+      warnings.push(`${state.item.name}: could not update stock.`);
+    }
+  }
+
+  await setData(data);
+  return warnings;
+}
+
+async function applyMoney(rows, days, data) {
+  const warnings = [];
+  const denom = String(data.defaults.currencyDenomination || "sp").toUpperCase();
+
+  for (const row of rows) {
+    if (!row.apply) continue;
+    const snap = await snapshotMember(row.member, data.defaults);
+    if (!snap.actor) {
+      warnings.push(`${row.member.name}: actor/token could not be resolved.`);
+      continue;
+    }
+
+    // A supplied settlement day satisfies the fractional requirement as well.
+    row.member.foodRemainder = 0;
+    row.member.waterRemainder = 0;
+
+    const cost = clampMin(row.moneyPerDay, 0) * days;
     if (!cost) continue;
     if (!snap.currency || !Number.isFinite(snap.money)) {
-      results.push(`${snap.actor.name}: carried ${denom} field could not be detected.`);
+      warnings.push(`${snap.actor.name}: carried ${denom} field could not be detected.`);
       continue;
     }
 
     await setCurrency(snap.actor, snap.currency, snap.money - cost);
-    if (snap.money < cost) results.push(`${snap.actor.name}: short ${cost - snap.money} ${denom}.`);
+    if (snap.money < cost) warnings.push(`${snap.actor.name}: short ${cost - snap.money} ${denom}.`);
   }
-  return results;
+
+  await setData(data);
+  return warnings;
 }
 
 function readDailyRows(dialog, members) {
@@ -296,17 +572,39 @@ function readDailyRows(dialog, members) {
   return members.map((member, index) => ({
     member,
     apply: !!form.elements[`apply-${index}`]?.checked,
-    foodPerDay: num(form.elements[`food-${index}`]?.value, member.foodPerDay),
-    waterPerDay: num(form.elements[`water-${index}`]?.value, member.waterPerDay),
-    moneyPerDay: num(form.elements[`money-${index}`]?.value, member.moneyPerDay)
+    foodPerDay: clampMin(form.elements[`food-${index}`]?.value ?? member.foodPerDay, 0),
+    waterPerDay: clampMin(form.elements[`water-${index}`]?.value ?? member.waterPerDay, 0),
+    moneyPerDay: clampMin(form.elements[`money-${index}`]?.value ?? member.moneyPerDay, 0)
   }));
 }
 
-function stockText(item, accessor) {
-  if (!item) return "Not found";
-  if (!accessor) return `${esc(item.name)} (no stock field)`;
-  const suffix = accessor.unit === "charges" ? "charges" : "qty";
-  return `${esc(accessor.value)} ${suffix} (${esc(item.name)})`;
+function readWaterMultiplier(dialog, fallback = 1) {
+  return clampMin(dialog.form.elements["water-multiplier"]?.value ?? fallback, 0);
+}
+
+function stockLine(entry) {
+  const item = entry.item;
+  const accessor = entry.accessor;
+  if (!accessor) return `${esc(item.name)} <span class="rp-muted">(no stock field · ${esc(entry.sourceLabel)})</span>`;
+
+  let amount;
+  if (accessor.unit === "charges") {
+    const max = num(accessor.max, 0);
+    amount = max > 0 ? `${esc(accessor.value)}/${esc(max)}` : `${esc(accessor.value)} charges`;
+  } else {
+    amount = `${esc(accessor.value)} qty`;
+  }
+
+  return `<strong>${amount}</strong> ${esc(item.name)} <span class="rp-muted">· ${esc(entry.sourceLabel)}</span>`;
+}
+
+function stockText(entries) {
+  if (!entries?.length) return `<span class="rp-missing">Not found</span>`;
+  return entries.map(stockLine).join("<br>");
+}
+
+function carrierText(snap) {
+  return snap.carrier ? `<div class="rp-subline"><i class="fa-solid fa-horse"></i> ${esc(snap.carrier.name)}</div>` : "";
 }
 
 async function showDailyPrompt(days = 1, worldTime = game.time.worldTime) {
@@ -327,25 +625,37 @@ async function showDailyPrompt(days = 1, worldTime = game.time.worldTime) {
     const fpd = m.foodPerDay ?? data.defaults.foodPerDay;
     const wpd = m.waterPerDay ?? data.defaults.waterPerDay;
     const mpd = m.moneyPerDay ?? data.defaults.moneyPerDay;
-    const foodText = s.actor ? stockText(s.food, s.foodAccessor) : "Actor missing";
-    const waterText = s.actor ? stockText(s.water, s.waterAccessor) : "Actor missing";
+    const foodText = s.actor ? stockText(s.foodEntries) : `<span class="rp-missing">Actor missing</span>`;
+    const waterText = s.actor ? stockText(s.waterEntries) : `<span class="rp-missing">Actor missing</span>`;
     const moneyText = Number.isFinite(s.money) ? s.money : "—";
 
     return `<tr>
       <td><input type="checkbox" name="apply-${i}" checked></td>
-      <td><strong>${esc(m.name)}</strong></td>
-      <td>${foodText}</td>
-      <td><input type="number" step="1" min="0" name="food-${i}" value="${esc(fpd)}"></td>
-      <td>${waterText}</td>
-      <td><input type="number" step="1" min="0" name="water-${i}" value="${esc(wpd)}"></td>
+      <td><strong>${esc(m.name)}</strong>${carrierText(s)}</td>
+      <td class="rp-stock">${foodText}</td>
+      <td>
+        <input type="number" step="0.25" min="0" name="food-${i}" value="${esc(fpd)}">
+        <div class="rp-subline">carry ${esc(roundFraction(m.foodRemainder ?? 0))}</div>
+      </td>
+      <td class="rp-stock">${waterText}</td>
+      <td>
+        <input type="number" step="0.25" min="0" name="water-${i}" value="${esc(wpd)}">
+        <div class="rp-subline">carry ${esc(roundFraction(m.waterRemainder ?? 0))}</div>
+      </td>
       <td>${esc(moneyText)} ${denom}</td>
       <td><input type="number" step="0.01" min="0" name="money-${i}" value="${esc(mpd)}"></td>
     </tr>`;
   }).join("");
 
   const content = `<div class="rp-daily">
-    <p><strong>${esc(dayLabel(worldTime))}</strong> — ${days} day${days === 1 ? "" : "s"} to process.</p>
-    <p>For road travel, deduct carried rations/water. In a settlement or other safe supply point, charge coin instead. You can override each character's usage before applying it.</p>
+    <div class="rp-day-summary">
+      <div><strong>${esc(dayLabel(worldTime))}</strong> — ${days} day${days === 1 ? "" : "s"} to process.</div>
+      <label class="rp-water-multiplier">Water demand
+        <input type="number" name="water-multiplier" min="0" step="0.5" value="${esc(data.defaults.waterMultiplier)}">
+        <span>× (1 normal · 2 hot · 3 desert)</span>
+      </label>
+    </div>
+    <p>Travel consumes whole WWN charges. Fractional daily needs are carried forward automatically. Matching supplies can come from the character or their assigned supply carrier/minion; partially-used charged items are consumed first.</p>
     <div class="rp-table-wrap"><table>
       <thead><tr><th>Use</th><th>Character</th><th>Food on hand</th><th>Food/day</th><th>Water on hand</th><th>Water/day</th><th>Carried ${denom}</th><th>${denom}/day</th></tr></thead>
       <tbody>${bodyRows}</tbody>
@@ -366,7 +676,8 @@ async function showDailyPrompt(days = 1, worldTime = game.time.worldTime) {
         default: data.mode === "travel",
         callback: async (_event, _button, dialog) => {
           const rows = readDailyRows(dialog, members);
-          const warnings = await applySupplies(rows, days, data.defaults);
+          const waterMultiplier = readWaterMultiplier(dialog, data.defaults.waterMultiplier);
+          const warnings = await applySupplies(rows, days, waterMultiplier, data);
           return { action: "supplies", warnings };
         }
       },
@@ -377,7 +688,7 @@ async function showDailyPrompt(days = 1, worldTime = game.time.worldTime) {
         default: data.mode === "settlement",
         callback: async (_event, _button, dialog) => {
           const rows = readDailyRows(dialog, members);
-          const warnings = await applyMoney(rows, days, data.defaults);
+          const warnings = await applyMoney(rows, days, data);
           return { action: "money", warnings };
         }
       },
@@ -402,13 +713,44 @@ async function showDailyPrompt(days = 1, worldTime = game.time.worldTime) {
   }
 }
 
+function carrierChoicesFor(memberUuid, selectedUuid) {
+  const choices = [{ uuid: "", name: "— None —", selected: !selectedUuid }];
+  const seen = new Set([memberUuid]);
+
+  for (const actor of game.actors?.contents ?? []) {
+    if (!actor?.uuid || seen.has(actor.uuid)) continue;
+    seen.add(actor.uuid);
+    choices.push({
+      uuid: actor.uuid,
+      name: `${actor.name} (${actor.type || "Actor"})`,
+      selected: actor.uuid === selectedUuid
+    });
+  }
+
+  for (const token of canvas?.scene?.tokens ?? []) {
+    if (!token?.actor || !token.uuid || seen.has(token.uuid)) continue;
+    // Linked tokens are already represented by their world Actor above.
+    if (token.actorLink && token.actor?.uuid && seen.has(token.actor.uuid)) continue;
+    seen.add(token.uuid);
+    choices.push({
+      uuid: token.uuid,
+      name: `${token.name || token.actor.name} (scene token)`,
+      selected: token.uuid === selectedUuid
+    });
+  }
+
+  const none = choices.shift();
+  choices.sort((a, b) => a.name.localeCompare(b.name));
+  return [none, ...choices];
+}
+
 class RoadProvisionsConfig extends foundry.appv1.api.FormApplication {
   static get defaultOptions() {
     return foundry.utils.mergeObject(super.defaultOptions, {
       id: "road-provisions-config",
       title: "Road Provisions — Worlds Without Number",
       template: `modules/${MODULE_ID}/templates/config.html`,
-      width: 900,
+      width: 1120,
       height: "auto",
       closeOnSubmit: false,
       submitOnChange: false,
@@ -418,8 +760,14 @@ class RoadProvisionsConfig extends foundry.appv1.api.FormApplication {
 
   async getData() {
     const data = await getData();
+    const members = data.members.map((m) => ({
+      ...m,
+      carrierOptions: carrierChoicesFor(m.uuid, m.carrierUuid)
+    }));
+
     return {
       ...data,
+      members,
       isTravel: data.mode === "travel",
       isSettlement: data.mode === "settlement",
       usesSP: data.defaults.currencyDenomination !== "gp",
@@ -446,18 +794,22 @@ class RoadProvisionsConfig extends foundry.appv1.api.FormApplication {
 
     next.mode = expanded.mode || existing.mode;
     next.defaults = foundry.utils.mergeObject(existing.defaults, expanded.defaults || {}, { inplace: false });
-    next.defaults.foodPerDay = Math.max(0, num(next.defaults.foodPerDay, 1));
-    next.defaults.waterPerDay = Math.max(0, num(next.defaults.waterPerDay, 1));
-    next.defaults.moneyPerDay = Math.max(0, num(next.defaults.moneyPerDay, 0));
+    next.defaults.foodPerDay = clampMin(next.defaults.foodPerDay, 0);
+    next.defaults.waterPerDay = clampMin(next.defaults.waterPerDay, 0);
+    next.defaults.waterMultiplier = clampMin(next.defaults.waterMultiplier ?? 1, 0);
+    next.defaults.moneyPerDay = clampMin(next.defaults.moneyPerDay, 0);
     next.defaults.currencyDenomination = next.defaults.currencyDenomination === "gp" ? "gp" : "sp";
 
     for (let i = 0; i < next.members.length; i++) {
       const patch = expanded.members?.[i] || {};
       next.members[i] = foundry.utils.mergeObject(next.members[i], patch, { inplace: false });
       next.members[i].enabled = raw[`members.${i}.enabled`] === true || raw[`members.${i}.enabled`] === "true" || raw[`members.${i}.enabled`] === "on";
-      next.members[i].foodPerDay = Math.max(0, num(next.members[i].foodPerDay, next.defaults.foodPerDay));
-      next.members[i].waterPerDay = Math.max(0, num(next.members[i].waterPerDay, next.defaults.waterPerDay));
-      next.members[i].moneyPerDay = Math.max(0, num(next.members[i].moneyPerDay, next.defaults.moneyPerDay));
+      next.members[i].foodPerDay = clampMin(next.members[i].foodPerDay ?? next.defaults.foodPerDay, 0);
+      next.members[i].waterPerDay = clampMin(next.members[i].waterPerDay ?? next.defaults.waterPerDay, 0);
+      next.members[i].moneyPerDay = clampMin(next.members[i].moneyPerDay ?? next.defaults.moneyPerDay, 0);
+      next.members[i].foodRemainder = roundFraction(next.members[i].foodRemainder ?? 0);
+      next.members[i].waterRemainder = roundFraction(next.members[i].waterRemainder ?? 0);
+      next.members[i].carrierUuid = String(next.members[i].carrierUuid || "");
     }
 
     await setData(next);
@@ -489,7 +841,10 @@ class RoadProvisionsConfig extends foundry.appv1.api.FormApplication {
         waterPerDay: data.defaults.waterPerDay,
         moneyPerDay: data.defaults.moneyPerDay,
         foodItemName: "",
-        waterItemName: ""
+        waterItemName: "",
+        carrierUuid: "",
+        foodRemainder: 0,
+        waterRemainder: 0
       });
       added++;
     }
@@ -513,7 +868,7 @@ class RoadProvisionsConfig extends foundry.appv1.api.FormApplication {
   async _promptNow(event) {
     event.preventDefault();
     await this._saveForm();
-    if (!isWWN()) return ui.notifications.error("Road Provisions v1.1 is specifically for the Worlds Without Number system (id: wwn).");
+    if (!isWWN()) return ui.notifications.error("Road Provisions is specifically for the Worlds Without Number system (id: wwn).");
     await showDailyPrompt(1, game.time.worldTime);
   }
 }
@@ -538,7 +893,7 @@ Hooks.once("init", () => {
   game.settings.registerMenu(MODULE_ID, "tracker", {
     name: "Road Provisions (WWN)",
     label: "Open Tracker",
-    hint: "Track WWN rations, water, and settlement expenses against the world's game clock.",
+    hint: "Track WWN rations, water, supply carriers, and settlement expenses against the world's game clock.",
     icon: "fa-solid fa-campground",
     type: RoadProvisionsConfig,
     restricted: true
@@ -562,7 +917,8 @@ Hooks.once("ready", async () => {
     getData,
     setData,
     detectConsumable: getConsumableAccessor,
-    detectCurrency: getCurrencyAccessor
+    detectCurrency: getCurrencyAccessor,
+    matchingItems: findMatchingItems
   };
 });
 
@@ -574,7 +930,6 @@ Hooks.on("updateWorldTime", async (worldTime, dt) => {
   const newKey = dayKey(worldTime);
   if (oldKey === newKey) return;
 
-  // Only one active GM processes each calendar transition.
   const activeGMs = game.users.filter((u) => u.active && u.isGM).sort((a, b) => a.id.localeCompare(b.id));
   if (activeGMs[0]?.id !== game.user.id) return;
 
@@ -587,10 +942,9 @@ Hooks.on("updateWorldTime", async (worldTime, dt) => {
     const newOrd = dayOrdinal(worldTime);
     if (typeof oldOrd === "number" && typeof newOrd === "number") days = Math.max(1, Math.floor(newOrd - oldOrd));
   } catch (_err) {
-    // One-day fallback if a custom calendar cannot provide a numeric difference.
+    // One-day fallback for custom calendars that cannot provide a numeric difference.
   }
 
-  // Mark before showing the modal to prevent duplicate simultaneous GM hooks.
   await game.settings.set(MODULE_ID, SETTING_LAST_DAY, newKey);
   await showDailyPrompt(days, worldTime);
 });
