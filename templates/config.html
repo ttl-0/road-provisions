@@ -1,0 +1,88 @@
+<form class="road-provisions-config {{cssClass}}" autocomplete="off">
+  <header class="rp-header">
+    <div>
+      <h2><i class="fa-solid fa-campground"></i> Road Provisions — WWN</h2>
+      <p>Current game date: <strong>{{currentDay}}</strong> · WWN {{systemVersion}}</p>
+    </div>
+    <button type="button" data-action="prompt-now"><i class="fa-solid fa-bell"></i> Test Daily Prompt</button>
+  </header>
+
+  {{#unless isWWN}}
+  <div class="rp-warning"><strong>Wrong game system.</strong> This build is restricted to Worlds Without Number (<code>wwn</code>).</div>
+  {{/unless}}
+
+  <fieldset>
+    <legend>WWN travel defaults</legend>
+    <div class="form-group">
+      <label>Usual daily handling</label>
+      <select name="mode">
+        <option value="travel" {{#if isTravel}}selected{{/if}}>On the road — deduct rations & water</option>
+        <option value="settlement" {{#if isSettlement}}selected{{/if}}>In safety — charge coin instead</option>
+      </select>
+    </div>
+
+    <div class="rp-grid rp-grid-4">
+      <label>Rations / day<input type="number" step="1" min="0" name="defaults.foodPerDay" value="{{defaults.foodPerDay}}"></label>
+      <label>Water / day<input type="number" step="1" min="0" name="defaults.waterPerDay" value="{{defaults.waterPerDay}}"></label>
+      <label>Settlement cost / day<input type="number" step="0.01" min="0" name="defaults.moneyPerDay" value="{{defaults.moneyPerDay}}"></label>
+      <label>Settlement currency
+        <select name="defaults.currencyDenomination">
+          <option value="sp" {{#if usesSP}}selected{{/if}}>Silver Pieces (SP)</option>
+          <option value="gp" {{#if usesGP}}selected{{/if}}>Gold Pieces (GP)</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="rp-grid rp-grid-2">
+      <label>Ration item aliases<input type="text" name="defaults.foodNames" value="{{defaults.foodNames}}" placeholder="Rations, Ration"></label>
+      <label>Water item aliases<input type="text" name="defaults.waterNames" value="{{defaults.waterNames}}" placeholder="Water, Waterskin"></label>
+    </div>
+
+    <p class="notes">WWN-native behavior: the module prefers an item's <strong>charges</strong> (as used by rations in WWN) and falls back to quantity when an item has no charge field. Currency is detected directly from the WWN actor; no system data paths are required.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Tracked party</legend>
+    <div class="rp-toolbar">
+      <button type="button" data-action="add-selected"><i class="fa-solid fa-user-plus"></i> Add Selected Tokens</button>
+      <span class="notes">Select the PCs you want included in daily upkeep, then click this button. Toggle a character off whenever they should not be charged.</span>
+    </div>
+
+    {{#if members.length}}
+    <div class="rp-table-wrap">
+      <table class="rp-members">
+        <thead>
+          <tr>
+            <th>On</th><th>Name</th><th>Rations/day</th><th>Water/day</th><th>Coin/day</th><th>Ration item override</th><th>Water item override</th><th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {{#each members as |m i|}}
+          <tr>
+            <td><input type="checkbox" name="members.{{i}}.enabled" {{#if m.enabled}}checked{{/if}}></td>
+            <td>
+              <strong>{{m.name}}</strong>
+              <input type="hidden" name="members.{{i}}.uuid" value="{{m.uuid}}">
+              <input type="hidden" name="members.{{i}}.name" value="{{m.name}}">
+              <div class="rp-uuid">{{m.uuid}}</div>
+            </td>
+            <td><input type="number" step="1" min="0" name="members.{{i}}.foodPerDay" value="{{m.foodPerDay}}"></td>
+            <td><input type="number" step="1" min="0" name="members.{{i}}.waterPerDay" value="{{m.waterPerDay}}"></td>
+            <td><input type="number" step="0.01" min="0" name="members.{{i}}.moneyPerDay" value="{{m.moneyPerDay}}"></td>
+            <td><input type="text" name="members.{{i}}.foodItemName" value="{{m.foodItemName}}" placeholder="Use aliases"></td>
+            <td><input type="text" name="members.{{i}}.waterItemName" value="{{m.waterItemName}}" placeholder="Use aliases"></td>
+            <td><button type="button" class="icon" data-action="remove-member" data-index="{{i}}" title="Remove"><i class="fa-solid fa-trash"></i></button></td>
+          </tr>
+          {{/each}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+      <p class="rp-empty">No party tokens are tracked yet.</p>
+    {{/if}}
+  </fieldset>
+
+  <footer class="sheet-footer flexrow">
+    <button type="submit"><i class="fa-solid fa-floppy-disk"></i> Save</button>
+  </footer>
+</form>
