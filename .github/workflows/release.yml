@@ -4,14 +4,15 @@ on:
   push:
     branches:
       - main
+    paths:
+      - "module.json"
 
-  # Also lets you manually trigger a release from GitHub if desired.
+  # Still allows you to manually run it if necessary.
   workflow_dispatch:
 
 permissions:
   contents: write
 
-# Prevent two rapid pushes from trying to create the same version.
 concurrency:
   group: foundry-release
   cancel-in-progress: false
@@ -24,57 +25,47 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      # ------------------------------------------------------------------
-      # Determine next version
-      #
-      # If module.json says 1.1.0:
-      #
-      #   no existing releases -> 1.1.1
-      #   latest v1.1.1      -> 1.1.2
-      #   latest v1.1.2      -> 1.1.3
-      #
-      # If you later change module.json to 1.2.0, releases switch to
-      # the v1.2.x series automatically.
-      # ------------------------------------------------------------------
+      # ------------------------------------------------------------
+      # Get version directly from module.json
+      # ------------------------------------------------------------
 
-      - name: Determine next version
+      - name: Read module version
         id: version
         shell: bash
         run: |
-          BASE_VERSION="$(jq -r '.version' module.json)"
+          VERSION="$(jq -r '.version' module.json)"
 
-          MAJOR="$(echo "$BASE_VERSION" | cut -d. -f1)"
-          MINOR="$(echo "$BASE_VERSION" | cut -d. -f2)"
-          BASE_PATCH="$(echo "$BASE_VERSION" | cut -d. -f3 | sed 's/[^0-9].*$//')"
-
-          echo "Base version: $BASE_VERSION"
-          echo "Searching existing v${MAJOR}.${MINOR}.x tags..."
-
-          LATEST_PATCH="$(
-            git tag --list "v${MAJOR}.${MINOR}.*" \
-              | sed -En "s/^v${MAJOR}\.${MINOR}\.([0-9]+)$/\1/p" \
-              | sort -n \
-              | tail -1
-          )"
-
-          if [ -z "$LATEST_PATCH" ]; then
-            LATEST_PATCH="$BASE_PATCH"
+          if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
+            echo "module.json does not contain a version."
+            exit 1
           fi
 
-          NEXT_PATCH=$((LATEST_PATCH + 1))
-          VERSION="${MAJOR}.${MINOR}.${NEXT_PATCH}"
-
-          echo "Building version: $VERSION"
+          echo "Building Road Provisions v${VERSION}"
 
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
 
-      # ------------------------------------------------------------------
-      # Build release-specific module.json
-      # ------------------------------------------------------------------
+      # ------------------------------------------------------------
+      # Make sure we aren't trying to publish the same version twice
+      # ------------------------------------------------------------
+
+      - name: Check release does not already exist
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          TAG="v${{ steps.version.outputs.version }}"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists."
+            echo "Increment the version in module.json before releasing."
+            exit 1
+          fi
+
+      # ------------------------------------------------------------
+      # Build release manifest
+      # ------------------------------------------------------------
 
       - name: Build release manifest
         shell: bash
@@ -100,15 +91,9 @@ jobs:
             ' \
             module.json > dist/package/module.json
 
-          echo "Generated manifest:"
-          cat dist/package/module.json
-
-      # ------------------------------------------------------------------
+      # ------------------------------------------------------------
       # Copy module contents
-      #
-      # Add another directory here later if the module gains things like:
-      # lang/, assets/, packs/, etc.
-      # ------------------------------------------------------------------
+      # ------------------------------------------------------------
 
       - name: Assemble module
         shell: bash
@@ -116,6 +101,18 @@ jobs:
           cp -R scripts dist/package/scripts
           cp -R styles dist/package/styles
           cp -R templates dist/package/templates
+
+          if [ -d lang ]; then
+            cp -R lang dist/package/lang
+          fi
+
+          if [ -d assets ]; then
+            cp -R assets dist/package/assets
+          fi
+
+          if [ -d packs ]; then
+            cp -R packs dist/package/packs
+          fi
 
           if [ -f README.md ]; then
             cp README.md dist/package/README.md
@@ -129,18 +126,9 @@ jobs:
             cp LICENSE.md dist/package/LICENSE.md
           fi
 
-      # ------------------------------------------------------------------
-      # Zip contents at archive root.
-      #
-      # Opening the ZIP will show:
-      #
-      # module.json
-      # scripts/
-      # styles/
-      # templates/
-      #
-      # rather than another unnecessary road-provisions/ directory.
-      # ------------------------------------------------------------------
+      # ------------------------------------------------------------
+      # Create Foundry module ZIP
+      # ------------------------------------------------------------
 
       - name: Build ZIP
         shell: bash
@@ -155,16 +143,14 @@ jobs:
 
           cd ..
 
-          # We also upload module.json separately because Foundry uses it
-          # as the stable installation/update manifest.
           cp package/module.json module.json
 
-          echo "Release contents:"
+          echo "Built:"
           ls -lah
 
-      # ------------------------------------------------------------------
-      # Create the GitHub Release
-      # ------------------------------------------------------------------
+      # ------------------------------------------------------------
+      # Publish GitHub release
+      # ------------------------------------------------------------
 
       - name: Create GitHub Release
         env:
