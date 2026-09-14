@@ -2,7 +2,7 @@
   "id": "road-provisions",
   "title": "Road Provisions for Worlds Without Number",
   "description": "WWN-specific daily ration, water, and settlement-cost tracking using Foundry VTT's world clock.",
-  "version": "1.1.9",
+  "version": "1.2.0",
 
   "url": "https://github.com/ttl-0/road-provisions",
   "manifest": "https://github.com/ttl-0/road-provisions/releases/latest/download/module.json",
@@ -10,7 +10,7 @@
 
   "compatibility": {
     "minimum": "14",
-    "verified": "14.365"
+    "verified": "14.367"
   },
 
   "authors": [
