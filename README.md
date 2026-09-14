@@ -41,12 +41,14 @@ The daily prompt displays charged water as gallons remaining. A half-used 20-gal
 
 Item matching is word/name based. It does not use loose substring matching, so an alias such as `Ration` will not accidentally match an item like `Exoskeleton Integration`.
 
-Default item names are semicolon-separated because WWN item names themselves can contain commas:
+Default item names are semicolon-separated because WWN item names themselves can contain commas. They are configured under **Configure Settings → Module Settings → Road Provisions**, rather than in the tracker window:
 
 ```text
 Rations, 1 week; Rations; Ration
 Waterskin, 1 gallon; Water; Waterskin; Water Skin
 ```
+
+The default `Water` alias is a whole-word match, so it intentionally recognizes names such as `20 Gallon Half-Barrel of Water`; that item name is not hardcoded. Remove or narrow the `Water` alias if you want only explicitly-listed water containers to count.
 
 ## Fractional daily needs
 
@@ -76,9 +78,9 @@ The multiplier applies only to water. A character with a base water requirement 
 
 ## Supply carriers / minions
 
-Each tracked PC can be assigned one optional **Supply Carrier / Minion**. The carrier can be a world Actor or an unlinked token in the current scene.
+Each tracked PC can be assigned **multiple Supply Carriers / Minions**. A carrier can be a world Actor or an unlinked token in the current scene. This supports combinations such as a shared party cart plus Esteban's personal mule.
 
-When travel supplies are deducted, the module checks both the PC and the assigned carrier. The same carrier may be assigned to multiple PCs, which supports shared pack animals or wagons.
+When travel supplies are deducted, the module checks the PC and every selected carrier. The same carrier may be assigned to multiple PCs, which supports shared pack animals, carts, or wagons. Duplicate actor references are de-duplicated automatically.
 
 Shared stock is transaction-safe within a daily deduction: if several PCs draw from the same mule, the module keeps one mutable stock plan so the same last ration cannot be counted for multiple characters.
 
@@ -128,6 +130,9 @@ game.modules.get("road-provisions").api.matchingItems(actor, member, "food", def
 - Charged water containers are preferred over quantity-only fallback items and remain in inventory when emptied.
 - Added fractional food/water requirements with per-PC carry-forward state.
 - Added a configurable daily water multiplier for hot/desert travel.
-- Added per-PC supply carriers/minions, including support for a shared carrier.
+- Added multiple per-PC supply carriers/minions, including combinations of shared and personal carriers.
+- Moved global ration/water item aliases into Foundry module settings.
+- Added live food/water stock previews to the tracker so it uses the same resource resolution as the daily prompt.
+- Fixed Add Selected Tokens toolbar alignment and clarified fractional-rate support.
 - Improved WWN 2.x carried-currency detection.
 - Updated the daily prompt to show stock source, carrier, and fractional carry state.

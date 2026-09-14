@@ -34,19 +34,14 @@
       </label>
     </div>
 
-    <div class="rp-grid rp-grid-2">
-      <label>Ration item names<input type="text" name="defaults.foodNames" value="{{defaults.foodNames}}" placeholder="Rations, 1 week; Rations"></label>
-      <label>Water item names<input type="text" name="defaults.waterNames" value="{{defaults.waterNames}}" placeholder="Waterskin, 1 gallon; Water"></label>
-    </div>
-
-    <p class="notes">Separate item names with semicolons. Matching uses whole names/words, so “Ration” will no longer match unrelated names such as “Integration”. Charged items are preferred, and partially-used bundles/containers are consumed before full ones. For water, configure containers with 1 charge of capacity per gallon (for example 1 for a waterskin or 20 for a half-barrel); the module treats WWN charges as capacity vs. expended and leaves emptied containers in inventory.</p>
+    <p class="notes">Global ration/water item aliases now live in <strong>Configure Settings → Module Settings → Road Provisions</strong>. Matching uses whole names/words, charged items are preferred, and partially-used bundles/containers are consumed before full ones. For water, configure containers with 1 charge of capacity per gallon (for example 1 for a waterskin or 20 for a half-barrel); the module treats WWN charges as capacity vs. expended and leaves emptied containers in inventory.</p>
   </fieldset>
 
   <fieldset>
     <legend>Tracked party</legend>
     <div class="rp-toolbar">
       <button type="button" data-action="add-selected"><i class="fa-solid fa-user-plus"></i> Add Selected Tokens</button>
-      <span class="notes">Each PC may use their own inventory plus one optional supply carrier/minion. The same carrier can be assigned to multiple PCs for a shared mount or wagon.</span>
+      <span class="notes">Each PC may use their own inventory plus any number of supply carriers/minions. A shared cart can be selected for everyone while an individual PC also has a personal mule. Use Ctrl/Cmd-click to select multiple carriers.</span>
     </div>
 
     {{#if members.length}}
@@ -54,7 +49,7 @@
       <table class="rp-members">
         <thead>
           <tr>
-            <th>On</th><th>Name</th><th>Rations/day</th><th>Water/day</th><th>Coin/day</th><th>Supply carrier / minion</th><th>Ration override</th><th>Water override</th><th></th>
+            <th>On</th><th>Name</th><th>Food on hand</th><th>Water on hand</th><th>Rations/day</th><th>Water/day</th><th>Coin/day</th><th>Supply carriers / minions</th><th>Ration override</th><th>Water override</th><th></th>
           </tr>
         </thead>
         <tbody>
@@ -70,11 +65,13 @@
               <div class="rp-uuid">{{m.uuid}}</div>
               <div class="rp-subline">fraction carry: food {{m.foodRemainder}} · water {{m.waterRemainder}}</div>
             </td>
-            <td><input type="number" step="0.25" min="0" name="members.{{i}}.foodPerDay" value="{{m.foodPerDay}}"></td>
-            <td><input type="number" step="0.25" min="0" name="members.{{i}}.waterPerDay" value="{{m.waterPerDay}}"></td>
+            <td class="rp-stock rp-main-stock">{{{m.foodStock}}}</td>
+            <td class="rp-stock rp-main-stock">{{{m.waterStock}}}</td>
+            <td><input type="number" step="0.25" min="0" name="members.{{i}}.foodPerDay" value="{{m.foodPerDay}}" title="Fractional values such as 0.5 are supported"></td>
+            <td><input type="number" step="0.25" min="0" name="members.{{i}}.waterPerDay" value="{{m.waterPerDay}}" title="Fractional values such as 0.5 are supported"></td>
             <td><input type="number" step="0.01" min="0" name="members.{{i}}.moneyPerDay" value="{{m.moneyPerDay}}"></td>
             <td>
-              <select name="members.{{i}}.carrierUuid" class="rp-carrier-select">
+              <select class="rp-carrier-select" data-member-carriers="{{i}}" multiple size="3" title="Ctrl/Cmd-click to select more than one carrier">
                 {{#each m.carrierOptions as |o|}}
                   <option value="{{o.uuid}}" {{#if o.selected}}selected{{/if}}>{{o.name}}</option>
                 {{/each}}

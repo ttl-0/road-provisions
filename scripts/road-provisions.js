@@ -1,8 +1,12 @@
 const MODULE_ID = "road-provisions";
 const SETTING_DATA = "trackerData";
 const SETTING_LAST_DAY = "lastProcessedDay";
+const SETTING_FOOD_NAMES = "foodItemNames";
+const SETTING_WATER_NAMES = "waterItemNames";
 const WWN_SYSTEM_ID = "wwn";
 const EPSILON = 1e-8;
+const DEFAULT_FOOD_NAMES = "Rations, 1 week; Rations; Ration";
+const DEFAULT_WATER_NAMES = "Waterskin, 1 gallon; Water; Waterskin; Water Skin";
 
 const DEFAULT_DATA = {
   mode: "travel",
@@ -11,8 +15,6 @@ const DEFAULT_DATA = {
     waterPerDay: 1,
     waterMultiplier: 1,
     moneyPerDay: 0,
-    foodNames: "Rations, 1 week; Rations; Ration",
-    waterNames: "Waterskin, 1 gallon; Water; Waterskin; Water Skin",
     currencyDenomination: "sp"
   },
   members: []
@@ -76,14 +78,10 @@ async function getData() {
   delete merged.defaults.quantityPath;
   delete merged.defaults.currencyPath;
 
-  // Migrate the old comma-separated defaults. Commas are valid parts of WWN item names,
-  // so v1.2 uses semicolons/newlines as separators instead.
-  if (merged.defaults.foodNames === "Rations, Ration") {
-    merged.defaults.foodNames = DEFAULT_DATA.defaults.foodNames;
-  }
-  if (merged.defaults.waterNames === "Water, Waterskin, Water Skin") {
-    merged.defaults.waterNames = DEFAULT_DATA.defaults.waterNames;
-  }
+  // Global item aliases live in Foundry's module settings rather than the
+  // tracker window. They are copied into runtime defaults for the matcher only.
+  merged.defaults.foodNames = String(game.settings.get(MODULE_ID, SETTING_FOOD_NAMES) || DEFAULT_FOOD_NAMES);
+  merged.defaults.waterNames = String(game.settings.get(MODULE_ID, SETTING_WATER_NAMES) || DEFAULT_WATER_NAMES);
 
   merged.defaults.foodPerDay = clampMin(merged.defaults.foodPerDay, 0);
   merged.defaults.waterPerDay = clampMin(merged.defaults.waterPerDay, 0);
@@ -102,14 +100,23 @@ async function getData() {
     member.waterRemainder = roundFraction(member.waterRemainder ?? 0);
     member.foodItemName ??= "";
     member.waterItemName ??= "";
-    member.carrierUuid ??= "";
+    if (!Array.isArray(member.carrierUuids)) {
+      member.carrierUuids = member.carrierUuid ? [member.carrierUuid] : [];
+    }
+    member.carrierUuids = [...new Set(member.carrierUuids.map((u) => String(u || "").trim()).filter(Boolean))];
+    delete member.carrierUuid;
   }
 
   return merged;
 }
 
 async function setData(data) {
-  return game.settings.set(MODULE_ID, SETTING_DATA, data);
+  const stored = clone(data);
+  // These are runtime copies sourced from normal Foundry module settings.
+  delete stored.defaults?.foodNames;
+  delete stored.defaults?.waterNames;
+  for (const member of stored.members ?? []) delete member.carrierUuid;
+  return game.settings.set(MODULE_ID, SETTING_DATA, stored);
 }
 
 async function resolveUuidActor(uuid) {
@@ -403,17 +410,37 @@ async function setCurrency(actor, accessor, amount) {
 
 async function supplySourcesForMember(member) {
   const actor = await resolveActor(member);
-  const carrier = member.carrierUuid ? await resolveUuidActor(member.carrierUuid) : null;
+  const carriers = [];
   const sources = [];
-  if (actor) sources.push({ actor, sourceRank: 0, sourceType: "self", label: actor.name });
-  if (carrier && carrier.uuid !== actor?.uuid) {
-    sources.push({ actor: carrier, sourceRank: 1, sourceType: "carrier", label: carrier.name });
+  const seenActors = new Set();
+
+  if (actor) {
+    sources.push({ actor, sourceRank: 0, sourceType: "self", label: actor.name });
+    seenActors.add(actor.uuid);
   }
-  return { actor, carrier, sources };
+
+  const carrierUuids = Array.isArray(member.carrierUuids)
+    ? member.carrierUuids
+    : member.carrierUuid ? [member.carrierUuid] : [];
+
+  for (const uuid of carrierUuids) {
+    const carrier = await resolveUuidActor(uuid);
+    if (!carrier || seenActors.has(carrier.uuid)) continue;
+    seenActors.add(carrier.uuid);
+    carriers.push(carrier);
+    sources.push({
+      actor: carrier,
+      sourceRank: sources.length,
+      sourceType: "carrier",
+      label: carrier.name
+    });
+  }
+
+  return { actor, carriers, sources };
 }
 
 async function resourceEntriesForMember(member, kind, defaults) {
-  const { actor, carrier, sources } = await supplySourcesForMember(member);
+  const { actor, carriers, sources } = await supplySourcesForMember(member);
   const entries = [];
   const seen = new Set();
 
@@ -434,20 +461,20 @@ async function resourceEntriesForMember(member, kind, defaults) {
     }
   }
 
-  return { actor, carrier, entries };
+  return { actor, carriers, entries };
 }
 
 async function snapshotMember(member, defaults) {
   const foodData = await resourceEntriesForMember(member, "food", defaults);
   const waterData = await resourceEntriesForMember(member, "water", defaults);
   const actor = foodData.actor ?? waterData.actor;
-  const carrier = foodData.carrier ?? waterData.carrier;
+  const carriers = foodData.carriers?.length ? foodData.carriers : (waterData.carriers ?? []);
   const currency = actor ? getCurrencyAccessor(actor, defaults.currencyDenomination) : null;
 
   return {
     member,
     actor,
-    carrier,
+    carriers,
     foodEntries: foodData.entries,
     waterEntries: waterData.entries,
     currency,
@@ -695,7 +722,9 @@ function stockText(entries) {
 }
 
 function carrierText(snap) {
-  return snap.carrier ? `<div class="rp-subline"><i class="fa-solid fa-horse"></i> ${esc(snap.carrier.name)}</div>` : "";
+  const carriers = snap.carriers ?? [];
+  if (!carriers.length) return "";
+  return `<div class="rp-subline"><i class="fa-solid fa-horse"></i> ${carriers.map((c) => esc(c.name)).join(" · ")}</div>`;
 }
 
 async function showDailyPrompt(days = 1, worldTime = game.time.worldTime) {
@@ -804,8 +833,9 @@ async function showDailyPrompt(days = 1, worldTime = game.time.worldTime) {
   }
 }
 
-function carrierChoicesFor(memberUuid, selectedUuid) {
-  const choices = [{ uuid: "", name: "— None —", selected: !selectedUuid }];
+function carrierChoicesFor(memberUuid, selectedUuids = []) {
+  const selected = new Set(Array.isArray(selectedUuids) ? selectedUuids : [selectedUuids].filter(Boolean));
+  const choices = [];
   const seen = new Set([memberUuid]);
 
   for (const actor of game.actors?.contents ?? []) {
@@ -814,7 +844,7 @@ function carrierChoicesFor(memberUuid, selectedUuid) {
     choices.push({
       uuid: actor.uuid,
       name: `${actor.name} (${actor.type || "Actor"})`,
-      selected: actor.uuid === selectedUuid
+      selected: selected.has(actor.uuid)
     });
   }
 
@@ -826,13 +856,12 @@ function carrierChoicesFor(memberUuid, selectedUuid) {
     choices.push({
       uuid: token.uuid,
       name: `${token.name || token.actor.name} (scene token)`,
-      selected: token.uuid === selectedUuid
+      selected: selected.has(token.uuid)
     });
   }
 
-  const none = choices.shift();
   choices.sort((a, b) => a.name.localeCompare(b.name));
-  return [none, ...choices];
+  return choices;
 }
 
 class RoadProvisionsConfig extends foundry.appv1.api.FormApplication {
@@ -851,10 +880,17 @@ class RoadProvisionsConfig extends foundry.appv1.api.FormApplication {
 
   async getData() {
     const data = await getData();
-    const members = data.members.map((m) => ({
-      ...m,
-      carrierOptions: carrierChoicesFor(m.uuid, m.carrierUuid)
-    }));
+    const members = [];
+
+    for (const m of data.members) {
+      const snap = await snapshotMember(m, data.defaults);
+      members.push({
+        ...m,
+        carrierOptions: carrierChoicesFor(m.uuid, m.carrierUuids),
+        foodStock: snap.actor ? stockText(snap.foodEntries) : `<span class="rp-missing">Actor missing</span>`,
+        waterStock: snap.actor ? stockText(snap.waterEntries) : `<span class="rp-missing">Actor missing</span>`
+      });
+    }
 
     return {
       ...data,
@@ -900,7 +936,12 @@ class RoadProvisionsConfig extends foundry.appv1.api.FormApplication {
       next.members[i].moneyPerDay = clampMin(next.members[i].moneyPerDay ?? next.defaults.moneyPerDay, 0);
       next.members[i].foodRemainder = roundFraction(next.members[i].foodRemainder ?? 0);
       next.members[i].waterRemainder = roundFraction(next.members[i].waterRemainder ?? 0);
-      next.members[i].carrierUuid = String(next.members[i].carrierUuid || "");
+
+      const carrierSelect = this.element?.[0]?.querySelector(`select[data-member-carriers="${i}"]`);
+      next.members[i].carrierUuids = carrierSelect
+        ? Array.from(carrierSelect.selectedOptions).map((o) => o.value).filter(Boolean)
+        : (next.members[i].carrierUuids ?? []);
+      delete next.members[i].carrierUuid;
     }
 
     await setData(next);
@@ -933,7 +974,7 @@ class RoadProvisionsConfig extends foundry.appv1.api.FormApplication {
         moneyPerDay: data.defaults.moneyPerDay,
         foodItemName: "",
         waterItemName: "",
-        carrierUuid: "",
+        carrierUuids: [],
         foodRemainder: 0,
         waterRemainder: 0
       });
@@ -981,6 +1022,24 @@ Hooks.once("init", () => {
     default: ""
   });
 
+  game.settings.register(MODULE_ID, SETTING_FOOD_NAMES, {
+    name: "Ration Item Names",
+    hint: "Semicolon-separated item names/words that count as food. Matching uses normalized whole names/words.",
+    scope: "world",
+    config: true,
+    type: String,
+    default: DEFAULT_FOOD_NAMES
+  });
+
+  game.settings.register(MODULE_ID, SETTING_WATER_NAMES, {
+    name: "Water Item Names",
+    hint: "Semicolon-separated item names/words that count as water. The default 'Water' alias matches names such as '20 Gallon Half-Barrel of Water'.",
+    scope: "world",
+    config: true,
+    type: String,
+    default: DEFAULT_WATER_NAMES
+  });
+
   game.settings.registerMenu(MODULE_ID, "tracker", {
     name: "Road Provisions (WWN)",
     label: "Open Tracker",
@@ -991,6 +1050,25 @@ Hooks.once("init", () => {
   });
 });
 
+
+async function migrateLegacySettings() {
+  const raw = clone(game.settings.get(MODULE_ID, SETTING_DATA) || {});
+  const legacyFood = String(raw.defaults?.foodNames || "").trim();
+  const legacyWater = String(raw.defaults?.waterNames || "").trim();
+
+  if (legacyFood && game.settings.get(MODULE_ID, SETTING_FOOD_NAMES) === DEFAULT_FOOD_NAMES) {
+    const migrated = legacyFood === "Rations, Ration" ? DEFAULT_FOOD_NAMES : legacyFood;
+    await game.settings.set(MODULE_ID, SETTING_FOOD_NAMES, migrated);
+  }
+  if (legacyWater && game.settings.get(MODULE_ID, SETTING_WATER_NAMES) === DEFAULT_WATER_NAMES) {
+    const migrated = legacyWater === "Water, Waterskin, Water Skin" ? DEFAULT_WATER_NAMES : legacyWater;
+    await game.settings.set(MODULE_ID, SETTING_WATER_NAMES, migrated);
+  }
+
+  const data = await getData();
+  await setData(data);
+}
+
 Hooks.once("ready", async () => {
   if (!game.user.isGM) return;
 
@@ -998,6 +1076,8 @@ Hooks.once("ready", async () => {
     ui.notifications.error("Road Provisions: this build is specifically for Worlds Without Number (system id: wwn).", { permanent: true });
     return;
   }
+
+  await migrateLegacySettings();
 
   const last = game.settings.get(MODULE_ID, SETTING_LAST_DAY);
   if (!last) await game.settings.set(MODULE_ID, SETTING_LAST_DAY, dayKey());
