@@ -204,19 +204,56 @@ function firstNumericPath(document, paths) {
 }
 
 /**
- * Detect the WWN consumable stock field. WWN charged items commonly expose a
- * current and maximum charge value. The detector intentionally accepts several
- * schema shapes because the v2.0 beta has changed data models during development.
+ * Detect the WWN consumable stock field.
+ *
+ * WWN 2.x uses an unusual charged-item shape for gear such as rations: the
+ * sheet presents a capacity and an amount already expended. In observed worlds
+ * that is `system.charges.value` (capacity) plus `system.charges.current`
+ * (expended). Road Provisions converts that to an internal "remaining units"
+ * value so food and water can share the same allocator.
+ *
+ * Other charge/uses shapes are still supported as conventional remaining-charge
+ * counters, followed by quantity as a compatibility fallback.
  */
 function getConsumableAccessor(item) {
-  const current = firstNumericPath(item, [
+  const wwnCapacity = firstNumericPath(item, [
     "system.charges.value",
+    "system.charges.max",
+    "system.charges.maximum",
+    "system.maxCharges",
+    "system.chargesMax"
+  ]);
+  const wwnExpended = firstNumericPath(item, [
     "system.charges.current",
     "system.charges.current.value",
+    "system.charges.used",
+    "system.charges.expended",
+    "system.charges.spent"
+  ]);
+
+  // Native WWN charged-item semantics: capacity / expended.
+  if (wwnCapacity && wwnExpended && wwnCapacity.path !== wwnExpended.path) {
+    const capacity = clampMin(wwnCapacity.value, 0);
+    const expended = Math.min(capacity, clampMin(wwnExpended.value, 0));
+    return {
+      path: wwnExpended.path,
+      value: Math.max(0, capacity - expended),
+      unit: "charges",
+      maxPath: wwnCapacity.path,
+      max: capacity,
+      chargeMode: "expended",
+      storedValue: expended
+    };
+  }
+
+  const current = firstNumericPath(item, [
     "system.charges.remaining",
     "system.uses.value",
     "system.uses.current",
     "system.uses.current.value",
+    "system.charge.value",
+    "system.charge.current",
+    "system.charges.value",
     "system.charges"
   ]);
 
@@ -227,6 +264,8 @@ function getConsumableAccessor(item) {
       "system.charges.max.value",
       "system.uses.max",
       "system.uses.maximum",
+      "system.charge.max",
+      "system.charge.maximum",
       "system.maxCharges",
       "system.chargesMax"
     ]);
@@ -235,13 +274,23 @@ function getConsumableAccessor(item) {
       value: current.value,
       unit: "charges",
       maxPath: maximum?.path ?? null,
-      max: maximum?.value ?? null
+      max: maximum?.value ?? null,
+      chargeMode: "remaining",
+      storedValue: current.value
     };
   }
 
   const quantity = firstNumericPath(item, ["system.quantity.value", "system.quantity"]);
   if (quantity) {
-    return { path: quantity.path, value: quantity.value, unit: "quantity", maxPath: null, max: null };
+    return {
+      path: quantity.path,
+      value: quantity.value,
+      unit: "quantity",
+      maxPath: null,
+      max: null,
+      chargeMode: null,
+      storedValue: quantity.value
+    };
   }
 
   return null;
@@ -249,7 +298,16 @@ function getConsumableAccessor(item) {
 
 async function setConsumableAmount(item, accessor, amount) {
   if (!accessor?.path) throw new Error(`No WWN consumable field detected on ${item.name}`);
-  await item.update({ [accessor.path]: Math.max(0, amount) });
+  const remaining = Math.max(0, amount);
+
+  if (accessor.unit === "charges" && accessor.chargeMode === "expended") {
+    const capacity = clampMin(accessor.max, 0);
+    const expended = Math.max(0, capacity - Math.min(capacity, remaining));
+    await item.update({ [accessor.path]: expended });
+    return;
+  }
+
+  await item.update({ [accessor.path]: remaining });
 }
 
 function normalizeKey(value) {
@@ -366,6 +424,7 @@ async function resourceEntriesForMember(member, kind, defaults) {
       seen.add(key);
       entries.push({
         item,
+        kind,
         accessor: getConsumableAccessor(item),
         sourceActor: source.actor,
         sourceRank: source.sourceRank,
@@ -404,11 +463,30 @@ function positiveModulo(value, divisor) {
 
 function consumptionPriority(entry, currentValue) {
   const max = num(entry.accessor?.max, 0);
-  const remainder = max > 0 ? positiveModulo(currentValue, max) : 0;
-  const isPartial = max > 0 && currentValue > 0 && remainder > EPSILON;
+  let isPartial = false;
+  let partialRemaining = Number.POSITIVE_INFINITY;
+
+  if (max > 0 && currentValue > 0) {
+    if (entry.accessor?.chargeMode === "expended") {
+      // WWN capacity/expended items are partial whenever some, but not all,
+      // capacity remains. This makes a 7/5 ration (2 remaining) get finished
+      // before a fresh 7/0 ration.
+      isPartial = currentValue < max - EPSILON;
+      partialRemaining = isPartial ? currentValue : Number.POSITIVE_INFINITY;
+    } else {
+      // Conventional remaining-charge counters may represent stacked bundles
+      // whose current value is larger than one bundle maximum. Finish the
+      // partial bundle before opening another full one.
+      const remainder = positiveModulo(currentValue, max);
+      isPartial = remainder > EPSILON;
+      partialRemaining = isPartial ? remainder : Number.POSITIVE_INFINITY;
+    }
+  }
+
   return {
     isPartial,
-    partialRemaining: isPartial ? remainder : Number.POSITIVE_INFINITY,
+    partialRemaining,
+    unitRank: entry.accessor?.unit === "charges" ? 0 : 1,
     sourceRank: entry.sourceRank,
     currentValue
   };
@@ -424,6 +502,10 @@ function sortForConsumption(entries, states) {
       const bp = consumptionPriority(b, bv);
       if (ap.isPartial !== bp.isPartial) return ap.isPartial ? -1 : 1;
       if (ap.partialRemaining !== bp.partialRemaining) return ap.partialRemaining - bp.partialRemaining;
+      // Prefer actual charged containers/bundles over quantity-only fallbacks.
+      // This is especially important for water, where one charge represents
+      // one gallon and the empty container should remain in inventory.
+      if (ap.unitRank !== bp.unitRank) return ap.unitRank - bp.unitRank;
       if (ap.sourceRank !== bp.sourceRank) return ap.sourceRank - bp.sourceRank;
       return ap.currentValue - bp.currentValue;
     });
@@ -590,7 +672,16 @@ function stockLine(entry) {
   let amount;
   if (accessor.unit === "charges") {
     const max = num(accessor.max, 0);
-    amount = max > 0 ? `${esc(accessor.value)}/${esc(max)}` : `${esc(accessor.value)} charges`;
+    const unitLabel = entry.kind === "water" ? "gal" : "charges";
+    if (max > 0) {
+      if (accessor.chargeMode === "expended") {
+        amount = `${esc(accessor.value)}/${esc(max)} ${unitLabel} left <span class="rp-muted">(${esc(accessor.storedValue)} used)</span>`;
+      } else {
+        amount = `${esc(accessor.value)}/${esc(max)} ${unitLabel} left`;
+      }
+    } else {
+      amount = `${esc(accessor.value)} ${unitLabel}`;
+    }
   } else {
     amount = `${esc(accessor.value)} qty`;
   }
@@ -655,7 +746,7 @@ async function showDailyPrompt(days = 1, worldTime = game.time.worldTime) {
         <span>× (1 normal · 2 hot · 3 desert)</span>
       </label>
     </div>
-    <p>Travel consumes whole WWN charges. Fractional daily needs are carried forward automatically. Matching supplies can come from the character or their assigned supply carrier/minion; partially-used charged items are consumed first.</p>
+    <p>Travel consumes whole WWN supply units. Charged water containers use <strong>1 charge = 1 gallon</strong>; charged rations use one remaining charge per ration-day. Fractional daily needs are carried forward automatically, and partially-used containers/bundles are consumed first.</p>
     <div class="rp-table-wrap"><table>
       <thead><tr><th>Use</th><th>Character</th><th>Food on hand</th><th>Food/day</th><th>Water on hand</th><th>Water/day</th><th>Carried ${denom}</th><th>${denom}/day</th></tr></thead>
       <tbody>${bodyRows}</tbody>

@@ -19,7 +19,25 @@ The module is designed around WWN charged items such as:
 - `Rations, 1 week`
 - `Waterskin, 1 gallon`
 
-For charged items it detects both current and maximum charges when the WWN data model exposes them. When several matching items are available, it prefers a **partially-used bundle before a full bundle**. It then prefers the character's own stock before their supply carrier when otherwise equivalent.
+For charged items it detects WWN's capacity/expended charge model and converts it to remaining usable supply. When several matching items are available, it prefers a **partially-used bundle or container before a full one**. It then prefers charged stock over quantity-only fallback items, and the character's own stock before their supply carrier when otherwise equivalent.
+
+### Water charges
+
+Charged water containers use a simple convention: **1 charge of capacity = 1 gallon of water**. WWN's charge counter is treated as capacity versus expended charges, so consuming water increases the expended count while leaving the empty container Item in the inventory.
+
+Recommended item setup:
+
+```text
+Waterskin, 1 gallon
+Capacity: 1 charge
+Expended: 0 when full, 1 when empty
+
+20 Gallon Half-Barrel of Water
+Capacity: 20 charges
+Expended: 0 when full, 20 when empty
+```
+
+The daily prompt displays charged water as gallons remaining. A half-used 20-gallon barrel is therefore shown as `10/20 gal left (10 used)`. Because partially-used containers are preferred, the module will continue drawing from an opened barrel before opening a fresh waterskin or another full barrel.
 
 Item matching is word/name based. It does not use loose substring matching, so an alias such as `Ration` will not accidentally match an item like `Exoskeleton Integration`.
 
@@ -45,7 +63,7 @@ The tracker displays each character's currently carried fraction for troubleshoo
 
 ## Water demand multiplier
 
-WWN's normal water requirement is treated as **1 ENC/person/day** by default. A `Waterskin, 1 gallon` can therefore represent one normal person-day of water when it has one usable charge.
+WWN's normal water requirement is treated as **1 ENC/person/day** by default. For provision tracking, one charged water unit is one gallon, so a full `Waterskin, 1 gallon` is configured as 1 charge of capacity with 0 charges expended and represents one normal person-day of water. Larger containers work the same way; a 20-gallon barrel has 20 charges of capacity.
 
 The tracker has a default water-demand multiplier and every daily prompt has an override:
 
@@ -105,7 +123,9 @@ game.modules.get("road-provisions").api.matchingItems(actor, member, "food", def
 
 - Fixed calendar display by using Foundry v14 calendar components directly.
 - Replaced unsafe substring resource matching with whole-name/word matching.
-- Added current/max charge detection and partial-bundle-first consumption.
+- Added WWN capacity/expended charge detection and partial-bundle-first consumption.
+- Added explicit charged-water support: 1 charge = 1 gallon, including multi-gallon containers such as barrels.
+- Charged water containers are preferred over quantity-only fallback items and remain in inventory when emptied.
 - Added fractional food/water requirements with per-PC carry-forward state.
 - Added a configurable daily water multiplier for hot/desert travel.
 - Added per-PC supply carriers/minions, including support for a shared carrier.
