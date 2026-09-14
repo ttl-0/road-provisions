@@ -1,0 +1,29 @@
+<form class="road-provisions-item-settings" autocomplete="off">
+  <p class="notes">
+    Separate aliases with semicolons. Matching uses normalized whole names/words, so <strong>Ration</strong> will match ration items without matching unrelated names such as <strong>Integration</strong>.
+  </p>
+
+  <div class="form-group stacked">
+    <label for="rp-food-item-names">Ration Item Names</label>
+    <div class="form-fields">
+      <textarea id="rp-food-item-names" name="foodNames" rows="3">{{foodNames}}</textarea>
+    </div>
+    <p class="hint">Examples: <code>Rations, 1 week; Rations; Ration</code></p>
+  </div>
+
+  <div class="form-group stacked">
+    <label for="rp-water-item-names">Water Item Names</label>
+    <div class="form-fields">
+      <textarea id="rp-water-item-names" name="waterNames" rows="3">{{waterNames}}</textarea>
+    </div>
+    <p class="hint">The whole-word alias <code>Water</code> also matches names such as <code>20 Gallon Half-Barrel of Water</code>.</p>
+  </div>
+
+  <p class="notes">
+    Charged items are preferred over quantity-only items. For water, one charge of capacity is treated as one gallon.
+  </p>
+
+  <footer class="sheet-footer flexrow">
+    <button type="submit"><i class="fa-solid fa-floppy-disk"></i> Save Item Matching</button>
+  </footer>
+</form>

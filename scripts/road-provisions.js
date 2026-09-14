@@ -870,8 +870,8 @@ class RoadProvisionsConfig extends foundry.appv1.api.FormApplication {
       id: "road-provisions-config",
       title: "Road Provisions — Worlds Without Number",
       template: `modules/${MODULE_ID}/templates/config.html`,
-      width: 1120,
-      height: "auto",
+      width: 900,
+      height: 760,
       closeOnSubmit: false,
       submitOnChange: false,
       resizable: true
@@ -911,6 +911,149 @@ class RoadProvisionsConfig extends foundry.appv1.api.FormApplication {
     html.find("[data-action='add-selected']").on("click", this._addSelected.bind(this));
     html.find("[data-action='remove-member']").on("click", this._removeMember.bind(this));
     html.find("[data-action='prompt-now']").on("click", this._promptNow.bind(this));
+
+    html.find("[data-carrier-search]").on("focus input", (event) => {
+      const index = Number(event.currentTarget.dataset.carrierSearch);
+      this._renderCarrierResults(index, true);
+    });
+
+    html.find("[data-carrier-search]").on("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      const index = Number(event.currentTarget.dataset.carrierSearch);
+      this._renderCarrierResults(index, false);
+      event.currentTarget.blur();
+    });
+
+    html.on("click", "[data-carrier-add]", (event) => {
+      event.preventDefault();
+      const index = Number(event.currentTarget.dataset.memberIndex);
+      const uuid = event.currentTarget.dataset.carrierAdd;
+      this._setCarrierSelected(index, uuid, true);
+    });
+
+    html.on("click", "[data-carrier-remove]", (event) => {
+      event.preventDefault();
+      const index = Number(event.currentTarget.dataset.memberIndex);
+      const uuid = event.currentTarget.dataset.carrierRemove;
+      this._setCarrierSelected(index, uuid, false);
+    });
+
+    for (const picker of html[0].querySelectorAll("[data-carrier-picker]")) {
+      const index = Number(picker.dataset.carrierPicker);
+      this._renderCarrierTags(index);
+    }
+  }
+
+  _carrierElements(index) {
+    const root = this.element?.[0];
+    if (!root || !Number.isInteger(index)) return {};
+    return {
+      select: root.querySelector(`select[data-member-carriers="${index}"]`),
+      tags: root.querySelector(`[data-carrier-tags="${index}"]`),
+      search: root.querySelector(`[data-carrier-search="${index}"]`),
+      results: root.querySelector(`[data-carrier-results="${index}"]`)
+    };
+  }
+
+  _renderCarrierTags(index) {
+    const { select, tags } = this._carrierElements(index);
+    if (!select || !tags) return;
+    tags.replaceChildren();
+
+    const selected = Array.from(select.selectedOptions);
+    if (!selected.length) {
+      const empty = document.createElement("span");
+      empty.className = "rp-carrier-empty";
+      empty.textContent = "No carriers assigned";
+      tags.append(empty);
+      return;
+    }
+
+    for (const option of selected) {
+      const tag = document.createElement("span");
+      tag.className = "rp-carrier-tag";
+
+      const text = document.createElement("span");
+      text.textContent = option.textContent;
+      tag.append(text);
+
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.dataset.carrierRemove = option.value;
+      remove.dataset.memberIndex = String(index);
+      remove.title = `Remove ${option.textContent}`;
+      remove.setAttribute("aria-label", remove.title);
+      remove.innerHTML = '<i class="fa-solid fa-xmark"></i>';
+      tag.append(remove);
+
+      tags.append(tag);
+    }
+  }
+
+  _renderCarrierResults(index, show = true) {
+    const { select, search, results } = this._carrierElements(index);
+    if (!select || !search || !results) return;
+
+    if (!show) {
+      results.hidden = true;
+      results.replaceChildren();
+      return;
+    }
+
+    const query = normalizeItemName(search.value);
+    const matches = Array.from(select.options)
+      .filter((option) => option.value && !option.selected)
+      .filter((option) => !query || normalizeItemName(option.textContent).includes(query))
+      .slice(0, 30);
+
+    results.replaceChildren();
+
+    if (!matches.length) {
+      const none = document.createElement("div");
+      none.className = "rp-carrier-no-results";
+      none.textContent = query ? "No matching actors or scene tokens." : "All available carriers are already assigned.";
+      results.append(none);
+      results.hidden = false;
+      return;
+    }
+
+    for (const option of matches) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "rp-carrier-result";
+      button.dataset.carrierAdd = option.value;
+      button.dataset.memberIndex = String(index);
+      button.textContent = option.textContent;
+      results.append(button);
+    }
+
+    const remaining = Array.from(select.options)
+      .filter((option) => option.value && !option.selected)
+      .filter((option) => !query || normalizeItemName(option.textContent).includes(query)).length - matches.length;
+
+    if (remaining > 0) {
+      const meta = document.createElement("div");
+      meta.className = "rp-carrier-result-meta";
+      meta.textContent = `${remaining} more result${remaining === 1 ? "" : "s"}; keep typing to narrow the list.`;
+      results.append(meta);
+    }
+
+    results.hidden = false;
+  }
+
+  _setCarrierSelected(index, uuid, selected) {
+    const { select, search } = this._carrierElements(index);
+    if (!select || !uuid) return;
+    const option = Array.from(select.options).find((candidate) => candidate.value === uuid);
+    if (!option) return;
+
+    option.selected = selected;
+    this._renderCarrierTags(index);
+    if (search) {
+      search.value = "";
+      search.focus();
+    }
+    this._renderCarrierResults(index, true);
   }
 
   async _saveForm() {
@@ -1005,6 +1148,36 @@ class RoadProvisionsConfig extends foundry.appv1.api.FormApplication {
   }
 }
 
+class RoadProvisionsItemSettings extends foundry.appv1.api.FormApplication {
+  static get defaultOptions() {
+    return foundry.utils.mergeObject(super.defaultOptions, {
+      id: "road-provisions-item-settings",
+      title: "Road Provisions — Item Matching",
+      template: `modules/${MODULE_ID}/templates/item-settings.html`,
+      width: 640,
+      height: "auto",
+      closeOnSubmit: true,
+      submitOnChange: false,
+      resizable: true
+    });
+  }
+
+  async getData() {
+    return {
+      foodNames: String(game.settings.get(MODULE_ID, SETTING_FOOD_NAMES) || DEFAULT_FOOD_NAMES),
+      waterNames: String(game.settings.get(MODULE_ID, SETTING_WATER_NAMES) || DEFAULT_WATER_NAMES)
+    };
+  }
+
+  async _updateObject(_event, formData) {
+    const foodNames = String(formData.foodNames || "").trim() || DEFAULT_FOOD_NAMES;
+    const waterNames = String(formData.waterNames || "").trim() || DEFAULT_WATER_NAMES;
+    await game.settings.set(MODULE_ID, SETTING_FOOD_NAMES, foodNames);
+    await game.settings.set(MODULE_ID, SETTING_WATER_NAMES, waterNames);
+    ui.notifications.info("Road Provisions item matching settings saved.");
+  }
+}
+
 Hooks.once("init", () => {
   game.settings.register(MODULE_ID, SETTING_DATA, {
     name: "Tracker Data",
@@ -1026,7 +1199,7 @@ Hooks.once("init", () => {
     name: "Ration Item Names",
     hint: "Semicolon-separated item names/words that count as food. Matching uses normalized whole names/words.",
     scope: "world",
-    config: true,
+    config: false,
     type: String,
     default: DEFAULT_FOOD_NAMES
   });
@@ -1035,9 +1208,18 @@ Hooks.once("init", () => {
     name: "Water Item Names",
     hint: "Semicolon-separated item names/words that count as water. The default 'Water' alias matches names such as '20 Gallon Half-Barrel of Water'.",
     scope: "world",
-    config: true,
+    config: false,
     type: String,
     default: DEFAULT_WATER_NAMES
+  });
+
+  game.settings.registerMenu(MODULE_ID, "itemMatching", {
+    name: "Provision Item Matching",
+    label: "Configure Item Names",
+    hint: "Choose which WWN item names or whole-word aliases count as rations and water.",
+    icon: "fa-solid fa-box-open",
+    type: RoadProvisionsItemSettings,
+    restricted: true
   });
 
   game.settings.registerMenu(MODULE_ID, "tracker", {

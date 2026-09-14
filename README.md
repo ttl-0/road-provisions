@@ -41,7 +41,7 @@ The daily prompt displays charged water as gallons remaining. A half-used 20-gal
 
 Item matching is word/name based. It does not use loose substring matching, so an alias such as `Ration` will not accidentally match an item like `Exoskeleton Integration`.
 
-Default item names are semicolon-separated because WWN item names themselves can contain commas. They are configured under **Configure Settings → Module Settings → Road Provisions**, rather than in the tracker window:
+Default item names are semicolon-separated because WWN item names themselves can contain commas. They are configured under **Configure Settings → Module Settings → Road Provisions → Configure Item Names**, rather than in the tracker window:
 
 ```text
 Rations, 1 week; Rations; Ration
@@ -78,7 +78,7 @@ The multiplier applies only to water. A character with a base water requirement 
 
 ## Supply carriers / minions
 
-Each tracked PC can be assigned **multiple Supply Carriers / Minions**. A carrier can be a world Actor or an unlinked token in the current scene. This supports combinations such as a shared party cart plus Esteban's personal mule.
+Each tracked PC can be assigned **multiple Supply Carriers / Minions**. A carrier can be a world Actor or an unlinked token in the current scene. This supports combinations such as a shared party cart plus Esteban's personal mule. The tracker uses a searchable picker rather than a giant multi-select: type part of an Actor/token name, click a result to add it, and click the × on a carrier tag to remove it.
 
 When travel supplies are deducted, the module checks the PC and every selected carrier. The same carrier may be assigned to multiple PCs, which supports shared pack animals, carts, or wagons. Duplicate actor references are de-duplicated automatically.
 
@@ -131,7 +131,9 @@ game.modules.get("road-provisions").api.matchingItems(actor, member, "food", def
 - Added fractional food/water requirements with per-PC carry-forward state.
 - Added a configurable daily water multiplier for hot/desert travel.
 - Added multiple per-PC supply carriers/minions, including combinations of shared and personal carriers.
-- Moved global ration/water item aliases into Foundry module settings.
+- Moved global ration/water item aliases into a dedicated **Configure Item Names** submenu in Foundry module settings.
+- Replaced the large multi-select carrier control with a searchable multi-carrier picker and removable tags.
+- Reworked the tracked-party layout into responsive character cards so the tracker scales cleanly without forcing an extra-wide table.
 - Added live food/water stock previews to the tracker so it uses the same resource resolution as the daily prompt.
 - Fixed Add Selected Tokens toolbar alignment and clarified fractional-rate support.
 - Improved WWN 2.x carried-currency detection.

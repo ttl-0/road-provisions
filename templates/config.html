@@ -1,10 +1,10 @@
 <form class="road-provisions-config {{cssClass}}" autocomplete="off">
   <header class="rp-header">
-    <div>
+    <div class="rp-title-block">
       <h2><i class="fa-solid fa-campground"></i> Road Provisions — WWN</h2>
       <p>Current game date: <strong>{{currentDay}}</strong> · WWN {{systemVersion}}</p>
     </div>
-    <button type="button" data-action="prompt-now"><i class="fa-solid fa-bell"></i> Test Daily Prompt</button>
+    <button type="button" class="rp-test-prompt" data-action="prompt-now"><i class="fa-solid fa-bell"></i><span>Test Daily Prompt</span></button>
   </header>
 
   {{#unless isWWN}}
@@ -13,7 +13,7 @@
 
   <fieldset>
     <legend>WWN travel defaults</legend>
-    <div class="form-group">
+    <div class="form-group rp-mode-row">
       <label>Usual daily handling</label>
       <select name="mode">
         <option value="travel" {{#if isTravel}}selected{{/if}}>On the road — deduct rations & water</option>
@@ -21,7 +21,7 @@
       </select>
     </div>
 
-    <div class="rp-grid rp-grid-5">
+    <div class="rp-default-grid">
       <label>Rations / day<input type="number" step="0.25" min="0" name="defaults.foodPerDay" value="{{defaults.foodPerDay}}"></label>
       <label>Water ENC / day<input type="number" step="0.25" min="0" name="defaults.waterPerDay" value="{{defaults.waterPerDay}}"></label>
       <label>Default water multiplier<input type="number" step="0.5" min="0" name="defaults.waterMultiplier" value="{{defaults.waterMultiplier}}" title="1 = normal, 2 = hot, 3 = desert"></label>
@@ -34,56 +34,85 @@
       </label>
     </div>
 
-    <p class="notes">Global ration/water item aliases now live in <strong>Configure Settings → Module Settings → Road Provisions</strong>. Matching uses whole names/words, charged items are preferred, and partially-used bundles/containers are consumed before full ones. For water, configure containers with 1 charge of capacity per gallon (for example 1 for a waterskin or 20 for a half-barrel); the module treats WWN charges as capacity vs. expended and leaves emptied containers in inventory.</p>
+    <p class="notes">Global ration/water item aliases live in <strong>Configure Settings → Module Settings → Road Provisions</strong>. Matching uses whole names/words, charged items are preferred, and partially-used bundles/containers are consumed before full ones. For water, configure containers with 1 charge of capacity per gallon.</p>
   </fieldset>
 
   <fieldset>
     <legend>Tracked party</legend>
     <div class="rp-toolbar">
-      <button type="button" data-action="add-selected"><i class="fa-solid fa-user-plus"></i> Add Selected Tokens</button>
-      <span class="notes">Each PC may use their own inventory plus any number of supply carriers/minions. A shared cart can be selected for everyone while an individual PC also has a personal mule. Use Ctrl/Cmd-click to select multiple carriers.</span>
+      <button type="button" class="rp-add-selected" data-action="add-selected">
+        <i class="fa-solid fa-user-plus"></i><span>Add Selected Tokens</span>
+      </button>
+      <span class="notes">Each PC can draw from their own inventory plus any number of shared or personal carriers. Search for a carrier, click it to add it, and use × on a tag to remove it.</span>
     </div>
 
     {{#if members.length}}
-    <div class="rp-table-wrap">
-      <table class="rp-members">
-        <thead>
-          <tr>
-            <th>On</th><th>Name</th><th>Food on hand</th><th>Water on hand</th><th>Rations/day</th><th>Water/day</th><th>Coin/day</th><th>Supply carriers / minions</th><th>Ration override</th><th>Water override</th><th></th>
-          </tr>
-        </thead>
-        <tbody>
-          {{#each members as |m i|}}
-          <tr>
-            <td><input type="checkbox" name="members.{{i}}.enabled" {{#if m.enabled}}checked{{/if}}></td>
-            <td>
-              <strong>{{m.name}}</strong>
-              <input type="hidden" name="members.{{i}}.uuid" value="{{m.uuid}}">
-              <input type="hidden" name="members.{{i}}.name" value="{{m.name}}">
-              <input type="hidden" name="members.{{i}}.foodRemainder" value="{{m.foodRemainder}}">
-              <input type="hidden" name="members.{{i}}.waterRemainder" value="{{m.waterRemainder}}">
-              <div class="rp-uuid">{{m.uuid}}</div>
-              <div class="rp-subline">fraction carry: food {{m.foodRemainder}} · water {{m.waterRemainder}}</div>
-            </td>
-            <td class="rp-stock rp-main-stock">{{{m.foodStock}}}</td>
-            <td class="rp-stock rp-main-stock">{{{m.waterStock}}}</td>
-            <td><input type="number" step="0.25" min="0" name="members.{{i}}.foodPerDay" value="{{m.foodPerDay}}" title="Fractional values such as 0.5 are supported"></td>
-            <td><input type="number" step="0.25" min="0" name="members.{{i}}.waterPerDay" value="{{m.waterPerDay}}" title="Fractional values such as 0.5 are supported"></td>
-            <td><input type="number" step="0.01" min="0" name="members.{{i}}.moneyPerDay" value="{{m.moneyPerDay}}"></td>
-            <td>
-              <select class="rp-carrier-select" data-member-carriers="{{i}}" multiple size="3" title="Ctrl/Cmd-click to select more than one carrier">
+    <div class="rp-member-list">
+      {{#each members as |m i|}}
+      <section class="rp-member-card">
+        <div class="rp-member-heading">
+          <label class="rp-enabled" title="Include this character in daily upkeep">
+            <input type="checkbox" name="members.{{i}}.enabled" {{#if m.enabled}}checked{{/if}}>
+            <span>Track</span>
+          </label>
+          <div class="rp-member-identity">
+            <strong>{{m.name}}</strong>
+            <input type="hidden" name="members.{{i}}.uuid" value="{{m.uuid}}">
+            <input type="hidden" name="members.{{i}}.name" value="{{m.name}}">
+            <input type="hidden" name="members.{{i}}.foodRemainder" value="{{m.foodRemainder}}">
+            <input type="hidden" name="members.{{i}}.waterRemainder" value="{{m.waterRemainder}}">
+            <div class="rp-uuid">{{m.uuid}}</div>
+            <div class="rp-subline">fraction carry: food {{m.foodRemainder}} · water {{m.waterRemainder}}</div>
+          </div>
+          <button type="button" class="rp-remove-member" data-action="remove-member" data-index="{{i}}" title="Remove {{m.name}} from tracking"><i class="fa-solid fa-trash"></i></button>
+        </div>
+
+        <div class="rp-member-grid">
+          <div class="rp-field rp-resource-field">
+            <span class="rp-field-label">Food on hand</span>
+            <div class="rp-stock rp-main-stock">{{{m.foodStock}}}</div>
+          </div>
+          <div class="rp-field rp-resource-field">
+            <span class="rp-field-label">Water on hand</span>
+            <div class="rp-stock rp-main-stock">{{{m.waterStock}}}</div>
+          </div>
+
+          <label class="rp-field">Rations / day
+            <input type="number" step="0.25" min="0" name="members.{{i}}.foodPerDay" value="{{m.foodPerDay}}" title="Fractional values such as 0.5 are supported">
+          </label>
+          <label class="rp-field">Water / day
+            <input type="number" step="0.25" min="0" name="members.{{i}}.waterPerDay" value="{{m.waterPerDay}}" title="Fractional values such as 0.5 are supported">
+          </label>
+          <label class="rp-field">Coin / day
+            <input type="number" step="0.01" min="0" name="members.{{i}}.moneyPerDay" value="{{m.moneyPerDay}}">
+          </label>
+
+          <div class="rp-field rp-carrier-field">
+            <span class="rp-field-label">Supply carriers / minions</span>
+            <div class="rp-carrier-picker" data-carrier-picker="{{i}}">
+              <select class="rp-carrier-store" data-member-carriers="{{i}}" multiple tabindex="-1" aria-hidden="true">
                 {{#each m.carrierOptions as |o|}}
                   <option value="{{o.uuid}}" {{#if o.selected}}selected{{/if}}>{{o.name}}</option>
                 {{/each}}
               </select>
-            </td>
-            <td><input type="text" name="members.{{i}}.foodItemName" value="{{m.foodItemName}}" placeholder="Use defaults"></td>
-            <td><input type="text" name="members.{{i}}.waterItemName" value="{{m.waterItemName}}" placeholder="Use defaults"></td>
-            <td><button type="button" class="icon" data-action="remove-member" data-index="{{i}}" title="Remove"><i class="fa-solid fa-trash"></i></button></td>
-          </tr>
-          {{/each}}
-        </tbody>
-      </table>
+              <div class="rp-carrier-tags" data-carrier-tags="{{i}}"></div>
+              <div class="rp-carrier-search-wrap">
+                <i class="fa-solid fa-magnifying-glass" aria-hidden="true"></i>
+                <input type="search" data-carrier-search="{{i}}" placeholder="Search actors or scene tokens…" autocomplete="off" aria-label="Search supply carriers">
+                <div class="rp-carrier-results" data-carrier-results="{{i}}" hidden></div>
+              </div>
+            </div>
+          </div>
+
+          <label class="rp-field">Ration override
+            <input type="text" name="members.{{i}}.foodItemName" value="{{m.foodItemName}}" placeholder="Use defaults">
+          </label>
+          <label class="rp-field">Water override
+            <input type="text" name="members.{{i}}.waterItemName" value="{{m.waterItemName}}" placeholder="Use defaults">
+          </label>
+        </div>
+      </section>
+      {{/each}}
     </div>
     {{else}}
       <p class="rp-empty">No party tokens are tracked yet.</p>
